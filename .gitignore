@@ -1,0 +1,20 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IPYNB checkpoints
+.ipynb_checkpoints/
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# Project-specific large datasets and temporary test folders
+dicom_samples/
+raw_datasamples_xray_chest/
+anonymized_xray_chest/
+test_outputs/
