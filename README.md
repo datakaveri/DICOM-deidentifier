@@ -1,4 +1,4 @@
-# DICOM-de-identifier
+# DICOM-deidentifier
 
 Flask microservice that de-identifies PHI from DICOM tag metadata.
 Part of the **SPIDEr** pipeline at IUDX / Data Kaveri.
@@ -77,8 +77,8 @@ Policy aligns with **DICOM PS3.15 Attribute Confidentiality Profiles**.
 ## Run locally
 
 ```bash
-git clone https://github.com/datakaveri/DICOM-de-identifier.git
-cd DICOM-de-identifier
+git clone https://github.com/datakaveri/DICOM-deidentifier.git
+cd DICOM-deidentifier
 python -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
@@ -156,7 +156,7 @@ directly — no intermediate file needed.
 ## Project structure
 
 ```
-DICOM-de-identifier/
+DICOM-deidentifier/
 ├── deidentifier.py      # core de-identification logic (import this)
 ├── server.py            # Flask REST API
 ├── detect_pii.py        # optional: Presidio-based PII scanner
