@@ -1,0 +1,14 @@
+version: "3.8"
+
+services:
+  dicom_deidentifier:
+    build: .
+    container_name: dicom_deidentifier_container
+    ports:
+      - "5001:5001"
+    environment:
+      - FLASK_ENV=production
+    volumes:
+      - .:/app
+    working_dir: /app
+    command: ["python", "server.py"]
