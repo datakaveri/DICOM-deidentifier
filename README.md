@@ -77,7 +77,7 @@ Policy aligns with **DICOM PS3.15 Attribute Confidentiality Profiles**.
 ## Run locally
 
 ```bash
-git clone https://github.com/Kailash-Reddy/DICOM-de-identifier.git
+git clone https://github.com/datakaveri/DICOM-de-identifier.git
 cd DICOM-de-identifier
 python -m venv venv
 source venv/bin/activate
