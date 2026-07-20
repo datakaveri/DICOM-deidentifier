@@ -1,0 +1,50 @@
+[
+  {
+    "tag": "(0008,0020)",
+    "field": "StudyDate",
+    "category": "date",
+    "value": "20241205"
+  },
+  {
+    "tag": "(0008,0021)",
+    "field": "SeriesDate",
+    "category": "date",
+    "value": "20241205"
+  },
+  {
+    "tag": "(0008,0022)",
+    "field": "AcquisitionDate",
+    "category": "date",
+    "value": "20241205"
+  },
+  {
+    "tag": "(0008,0080)",
+    "field": "InstitutionName",
+    "category": "name",
+    "value": "KEM HOSPITAL MUMBAI"
+  },
+  {
+    "tag": "(0008,0090)",
+    "field": "ReferringPhysicianName",
+    "category": "name",
+    "value": "DR^KULKARNI"
+  },
+  {
+    "tag": "(0010,0010)",
+    "field": "PatientName",
+    "category": "name",
+    "value": "IYER^MEERA"
+  },
+  {
+    "tag": "(0010,0020)",
+    "field": "PatientID",
+    "category": "id",
+    "value": "XR-20241205-17"
+  },
+  {
+    "tag": "(0010,0030)",
+    "field": "PatientBirthDate",
+    "category": "date",
+    "value": "19620214"
+  }
+]

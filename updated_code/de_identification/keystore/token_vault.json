@@ -1,0 +1,10 @@
+{
+  "AccessionNumber": {
+    "forward": {
+      "ACC20241110001": "TK-000001"
+    },
+    "reverse": {
+      "TK-000001": "ACC20241110001"
+    }
+  }
+}

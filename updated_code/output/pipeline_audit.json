@@ -1,0 +1,174 @@
+{
+  "file": "input.dcm",
+  "input_path": "input/input.dcm",
+  "output_path": "output/before_deidentification.dcm",
+  "timestamp": "2026-07-20T10:19:41.092664",
+  "modality": "CR",
+  "image_size": "640x640",
+  "redacted_regions": [
+    {
+      "text": "REM HOSF",
+      "bbox": [
+        144,
+        337,
+        295,
+        375
+      ]
+    },
+    {
+      "text": "PATIENT :",
+      "bbox": [
+        144,
+        161,
+        293,
+        199
+      ]
+    },
+    {
+      "text": "PID:",
+      "bbox": [
+        144,
+        224,
+        220,
+        256
+      ]
+    },
+    {
+      "text": "MEERA",
+      "bbox": [
+        306,
+        166,
+        406,
+        198
+      ]
+    },
+    {
+      "text": "XR-20241205-17",
+      "bbox": [
+        234,
+        221,
+        495,
+        257
+      ]
+    },
+    {
+      "text": "HOSPITAL MUMBAI",
+      "bbox": [
+        217,
+        336,
+        497,
+        376
+      ]
+    },
+    {
+      "text": "HOSPITAL",
+      "bbox": [
+        218,
+        339,
+        368,
+        371
+      ]
+    },
+    {
+      "text": "196",
+      "bbox": [
+        237,
+        279,
+        295,
+        315
+      ]
+    },
+    {
+      "text": "DOB:",
+      "bbox": [
+        144,
+        280,
+        220,
+        312
+      ]
+    },
+    {
+      "text": "QOB0 0982-02p14",
+      "bbox": [
+        142,
+        271,
+        430,
+        326
+      ]
+    },
+    {
+      "text": "IYER",
+      "bbox": [
+        416,
+        166,
+        496,
+        198
+      ]
+    },
+    {
+      "text": "-14",
+      "bbox": [
+        364,
+        282,
+        422,
+        312
+      ]
+    },
+    {
+      "text": "TORTABLEAPEEREG",
+      "bbox": [
+        140,
+        382,
+        363,
+        427
+      ]
+    },
+    {
+      "text": "'KEn HoskttL MBAI",
+      "bbox": [
+        128,
+        326,
+        502,
+        380
+      ]
+    },
+    {
+      "text": "FID: SR20241205-074",
+      "bbox": [
+        137,
+        207,
+        511,
+        267
+      ]
+    },
+    {
+      "text": "RATIENTY WeeRA DER",
+      "bbox": [
+        137,
+        154,
+        500,
+        210
+      ]
+    },
+    {
+      "text": "RA",
+      "bbox": [
+        364,
+        166,
+        400,
+        192
+      ]
+    },
+    {
+      "text": "XR",
+      "bbox": [
+        236,
+        224,
+        280,
+        254
+      ]
+    }
+  ],
+  "verification_status": "PASSED",
+  "error": null
+}
