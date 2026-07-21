@@ -10,7 +10,7 @@ import datetime
 import numpy as np
 import pydicom
 
-from config import log, DATA_SNAPSHOT
+from config import log, DATA_SNAPSHOT, BEFORE_OUTPUT_DCM
 from metadata import sanitize_metadata
 from image_enhance import enhance_image
 from ocr_detect import detect_text
@@ -52,12 +52,10 @@ def anonymize_dicom_file(input_path, output_path, paddle_ocr, easy_ocr, analyzer
         cols = getattr(ds, "Columns", "?")
         audit["image_size"] = f"{rows}x{cols}"
 
-        # ── Stage 1: Metadata ─────────────────────────────────────────────────
-        ds = sanitize_metadata(ds)
-
         # ── Extract pixels ────────────────────────────────────────────────────
         if not hasattr(ds, 'pixel_array'):
             log.warning(f"  No pixel data in {filename}. Saving metadata-only.")
+            ds = sanitize_metadata(ds)
             ds.save_as(output_path, write_like_original=False)
             audit["verification_status"] = "SKIPPED (no pixels)"
             return audit
@@ -160,6 +158,14 @@ def anonymize_dicom_file(input_path, output_path, paddle_ocr, easy_ocr, analyzer
             cleaned_pixels_final = original_max - cleaned_pixels_final
             log.info("  Flipped pixels back to MONOCHROME1 representation.")
         ds = write_pixels_to_dicom(ds, cleaned_pixels_final)
+
+        # ── Checkpoint: pixels redacted, tags still original ─────────────────
+        os.makedirs(os.path.dirname(BEFORE_OUTPUT_DCM), exist_ok=True)
+        ds.save_as(BEFORE_OUTPUT_DCM, write_like_original=False)
+        log.info(f"  [Checkpoint] Pixel-redacted DICOM saved (tags still original): {BEFORE_OUTPUT_DCM}")
+
+        # ── Last: tag de-identification ───────────────────────────────────────
+        ds = sanitize_metadata(ds)
 
         # ── Save as DICOM ONLY ────────────────────────────────────────────────
         ds.save_as(output_path, write_like_original=False)

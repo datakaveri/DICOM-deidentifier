@@ -27,7 +27,8 @@ log = logging.getLogger("dicom_anonymizer")
 # CONFIGURATION
 # =============================================================================
 INPUT_DCM = "input/input.dcm"
-FINAL_OUTPUT_DCM = "output/before_deidentification.dcm"
+BEFORE_OUTPUT_DCM = "output/before_deidentification.dcm"
+FINAL_OUTPUT_DCM = "output/after_deidentification.dcm"
 DATA_SNAPSHOT = "output/data.json"
 PHI_TAGS_SNAPSHOT = "output/phi_tags.json"
 PIPELINE_AUDIT_SNAPSHOT = "output/pipeline_audit.json"

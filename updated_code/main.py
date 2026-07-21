@@ -3,10 +3,10 @@ main.py — entry point. Reads the raw DICOM once, snapshots/identifies tags
 (read-only, Step 1), then runs the burned-in pixel text anonymization
 pipeline (Step 2 + Step 3) and reports the result.
 
-Policy: DICOM tag VALUES are left exactly as-is everywhere in this pipeline
-(only UIDs are regenerated and private/vendor tags are stripped, so the file
-can't be linked back to the original study). No tag is hashed, removed, or
-generalized. PHI is removed from the pixel data instead — see pipeline.py.
+Pipeline order (see pipeline.py): pixels are redacted first and checkpointed
+to before_deidentification.dcm (tags still original at that point), then tag
+de-identification (metadata.py) runs last, and that final result is saved to
+after_deidentification.dcm.
 """
 
 import os
@@ -15,8 +15,8 @@ import json
 import pydicom
 
 from config import (
-    INPUT_DCM, FINAL_OUTPUT_DCM, DATA_SNAPSHOT, PHI_TAGS_SNAPSHOT,
-    PIPELINE_AUDIT_SNAPSHOT,
+    INPUT_DCM, FINAL_OUTPUT_DCM, DATA_SNAPSHOT,
+    PHI_TAGS_SNAPSHOT, PIPELINE_AUDIT_SNAPSHOT,
 )
 from phi_tags import dump_original_tags, identify_phi_tags
 from engines import check_gpu_available, initialize_engines
@@ -40,11 +40,13 @@ def main():
     for t in phi_tags:
         print(f"{t['tag']:>14}  {t['field']:<28} {t['category']:<14} {t['value'][:40]!r}")
 
-    # ── Step 2 (+ Step 3): burned-in pixel text anonymization ──────────────
-    # Works directly on the raw input file — tag values are never changed;
-    # only the pixels are redacted, using the PHI tag values above (Step 3)
-    # to help find matching burned-in text on the image.
-    print("\nRunning burned-in pixel text anonymization pipeline...")
+    # ── Step 2 (+ Step 3): burned-in pixel redaction, then tag de-identification ──
+    # Runs directly on the raw input: PHI baked into the pixels is redacted
+    # first (masking.py), using the original tag values above (Step 3) to
+    # help find matching burned-in text on the image; the pixel-redacted
+    # result is checkpointed to before_deidentification.dcm, then tag
+    # de-identification (metadata.py) runs last, producing after_deidentification.dcm.
+    print("\nRunning de-identification pipeline (pixels, then tags)...")
     use_gpu = check_gpu_available()
     paddle_ocr, easy_ocr, analyzer = initialize_engines(use_gpu=use_gpu)
 
