@@ -13,6 +13,20 @@ env/
 venv/
 ENV/
 
+# Pytest
+.pytest_cache/
+
+# Runtime data/config/output — mounted volumes in deployment, local scratch
+# space in development. Never commit patient DICOM data or key material.
+app/data/*
+!app/data/.gitkeep
+app/config/*
+!app/config/.gitkeep
+app/output/
+
+# Raw sample dataset — real patient DICOM files, never commit
+raw_telanagana_dicom_dataset/
+
 # Project-specific large datasets and temporary test folders
 dicom_samples/
 raw_datasamples_xray_chest/

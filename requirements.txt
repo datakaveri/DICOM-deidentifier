@@ -1,0 +1,8 @@
+pydicom==2.4.4
+numpy==1.26.4
+opencv-python-headless==4.9.0.80
+paddlepaddle==2.6.1
+paddleocr==2.7.3
+easyocr==1.7.1
+presidio-analyzer==2.2.354
+spacy==3.7.4
