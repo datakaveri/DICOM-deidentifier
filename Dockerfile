@@ -5,13 +5,19 @@
 # de-identification, and writes results + audit logs under /app/output.
 #
 # CPU-only by default (see the torch install step below) — no CUDA/nvidia
-# runtime required. To build a GPU variant, swap the CPU torch wheel for a
-# CUDA build and `paddlepaddle` for `paddlepaddle-gpu`.
+# runtime required. To build a GPU variant, swap the CPU torch wheel below
+# for a CUDA build.
+#
+# OCR uses EasyOCR only (PaddleOCR was dropped: PaddlePaddle and PyTorch
+# each bundle conflicting native allocators/OpenMP runtimes, and running
+# both in the same process reliably corrupted the heap once real model
+# work started — see ocr_detect.py, which already tolerates a single OCR
+# engine).
 
 FROM python:3.10-slim
 
-# System libraries required by opencv-python-headless / paddleocr / easyocr
-# at import/runtime (image codecs, OpenMP, X11 stubs some wheels still link).
+# System libraries required by opencv-python-headless / easyocr at
+# import/runtime (image codecs, OpenMP, X11 stubs some wheels still link).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libgl1 \
         libglib2.0-0 \
@@ -29,8 +35,14 @@ RUN pip install --no-cache-dir torch==2.2.2 torchvision==0.17.2 \
         --index-url https://download.pytorch.org/whl/cpu
 
 COPY requirements.txt .
+# Install the spaCy model as a direct wheel URL, pinned to a version
+# compatible with spacy==3.7.4 above. `spacy download` shells out to a
+# GitHub compatibility-check API that has proven unreliable in CI/Docker
+# builds (it can return a malformed release URL); a pinned wheel avoids
+# that lookup entirely.
 RUN pip install --no-cache-dir -r requirements.txt \
-    && python -m spacy download en_core_web_sm
+    && pip install --no-cache-dir \
+        https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1-py3-none-any.whl
 
 COPY app/ .
 

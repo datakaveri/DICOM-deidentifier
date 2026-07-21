@@ -2,7 +2,7 @@
 
 De-identification pipeline for radiology DICOM files, built for the SPIDEr platform. Removes Protected Health Information (PHI) at two levels in a single pass:
 
-1. **Burned-in pixel text** — dual-engine OCR (PaddleOCR + EasyOCR) finds names, IDs, dates, phone numbers, and other PHI printed directly into the image, classifies it against a clinical allowlist and NLP (Presidio), and redacts it with structure-preserving inpainting (no quality loss to the underlying anatomy).
+1. **Burned-in pixel text** — OCR (EasyOCR) finds names, IDs, dates, phone numbers, and other PHI printed directly into the image, classifies it against a clinical allowlist and NLP (Presidio), and redacts it with structure-preserving inpainting (no quality loss to the underlying anatomy). PaddleOCR is supported as an optional second engine in `engines.py`/`ocr_detect.py` for local, non-containerized use, but is deliberately left out of the Docker image — running PaddlePaddle and PyTorch in the same process corrupts the heap once both load real model weights.
 2. **DICOM tag values** — every header tag is passed through a per-tag technique (hash, tokenise, format-preserving encrypt, suppress, or retain) defined in [`app/de_identification/tag_mapping.py`](app/de_identification/tag_mapping.py), plus private/vendor tag stripping and UID regeneration.
 
 The output is always a valid `.dcm` file — never a PNG/JPEG export — so downstream DICOM tooling keeps working.

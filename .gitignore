@@ -27,6 +27,9 @@ app/output/
 # Raw sample dataset — real patient DICOM files, never commit
 raw_telanagana_dicom_dataset/
 
+# Ad-hoc visual inspection output (PNG previews of DICOM pixel data)
+preview/
+
 # Project-specific large datasets and temporary test folders
 dicom_samples/
 raw_datasamples_xray_chest/

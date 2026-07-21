@@ -79,8 +79,17 @@ def initialize_engines(use_gpu=False):
     analyzer = None
     if PRESIDIO_AVAILABLE:
         try:
-            analyzer = AnalyzerEngine()
-            print("  [OK] Presidio NLP Analyzer initialized")
+            # AnalyzerEngine() defaults to spacy's en_core_web_lg (~600MB) if
+            # not told otherwise. We only install en_core_web_sm (~12MB), so
+            # pin the NLP engine to it explicitly instead of triggering an
+            # unwanted large-model download.
+            from presidio_analyzer.nlp_engine import NlpEngineProvider
+            nlp_engine = NlpEngineProvider(nlp_configuration={
+                "nlp_engine_name": "spacy",
+                "models": [{"lang_code": "en", "model_name": "en_core_web_sm"}],
+            }).create_engine()
+            analyzer = AnalyzerEngine(nlp_engine=nlp_engine)
+            print("  [OK] Presidio NLP Analyzer initialized (en_core_web_sm)")
         except Exception as e:
             print(f"  [WARN] Presidio failed to init: {e}")
 

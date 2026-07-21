@@ -12,8 +12,6 @@ import os
 import logging
 
 # ─── Suppress verbose sub-library logs ───────────────────────────────────────
-os.environ["FLAGS_use_mkldnn"] = "0"
-os.environ["PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT"] = "0"
 os.environ["DISABLE_AUTO_LOGGING_CONFIG"] = "1"
 
 logging.basicConfig(
