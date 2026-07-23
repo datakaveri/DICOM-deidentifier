@@ -10,8 +10,7 @@ import datetime
 import numpy as np
 import pydicom
 
-from config import log, DATA_SNAPSHOT
-from metadata import sanitize_metadata
+from config import log
 from image_enhance import enhance_image
 from ocr_detect import detect_text
 from classify import merge_detections, classify_phi, _iou
@@ -19,11 +18,24 @@ from phi_tags import load_original_tag_values, match_against_stored_tags
 from masking import redact_pixels
 from verify import verify_redaction
 from dicom_io import write_pixels_to_dicom
+from de_identification.deidentify import deidentify_dataset
 
 
-def anonymize_dicom_file(input_path, output_path, paddle_ocr, easy_ocr, analyzer):
+def anonymize_dicom_file(input_path, before_output_path, output_path,
+                          data_snapshot_path, paddle_ocr, easy_ocr, analyzer,
+                          keystore):
     """
-    Full 7-stage anonymization pipeline for a single DICOM file.
+    Full 7-stage anonymization pipeline for a single DICOM file: burned-in
+    pixel/OCR redaction (checkpointed to before_output_path, tags still
+    original), then tag-level de-identification (hash/mask/suppress per
+    de_identification/tag_mapping.py) as the last step, saved to output_path.
+
+    `keystore` should be one shared KeyStore instance reused across every
+    file in a batch, so hash/tokenise/encrypt values stay consistent across
+    the whole set. `data_snapshot_path` is this file's own original-tag
+    snapshot (per phi_tags.dump_original_tags), used for the Step 3
+    burned-in-text cross-check.
+
     Returns an audit dict.
     """
     filename = os.path.basename(input_path)
@@ -34,11 +46,13 @@ def anonymize_dicom_file(input_path, output_path, paddle_ocr, easy_ocr, analyzer
     audit = {
         "file": filename,
         "input_path":  input_path,
+        "before_output_path": before_output_path,
         "output_path": output_path,
         "timestamp":   datetime.datetime.now().isoformat(),
         "modality":    "Unknown",
         "image_size":  "Unknown",
         "redacted_regions": [],
+        "deidentified_tags": [],
         "verification_status": "NOT RUN",
         "error": None
     }
@@ -52,12 +66,12 @@ def anonymize_dicom_file(input_path, output_path, paddle_ocr, easy_ocr, analyzer
         cols = getattr(ds, "Columns", "?")
         audit["image_size"] = f"{rows}x{cols}"
 
-        # ── Stage 1: Metadata ─────────────────────────────────────────────────
-        ds = sanitize_metadata(ds)
-
         # ── Extract pixels ────────────────────────────────────────────────────
         if not hasattr(ds, 'pixel_array'):
             log.warning(f"  No pixel data in {filename}. Saving metadata-only.")
+            os.makedirs(os.path.dirname(before_output_path), exist_ok=True)
+            ds.save_as(before_output_path, write_like_original=False)
+            audit["deidentified_tags"] = deidentify_dataset(ds, keystore)
             ds.save_as(output_path, write_like_original=False)
             audit["verification_status"] = "SKIPPED (no pixels)"
             return audit
@@ -113,7 +127,7 @@ def anonymize_dicom_file(input_path, output_path, paddle_ocr, easy_ocr, analyzer
 
         # ── Step 3: match OCR text against the full original-tag backup ────────
         log.info("  [Step 3] Cross-checking OCR text against data.json (original tag values)...")
-        stored_values = load_original_tag_values(DATA_SNAPSHOT)
+        stored_values = load_original_tag_values(data_snapshot_path)
         tag_matches = match_against_stored_tags(merged, stored_values, ocr_frame.shape)
         existing_bboxes = [r["bbox"] for r in phi_regions]
         added = 0
@@ -160,6 +174,14 @@ def anonymize_dicom_file(input_path, output_path, paddle_ocr, easy_ocr, analyzer
             cleaned_pixels_final = original_max - cleaned_pixels_final
             log.info("  Flipped pixels back to MONOCHROME1 representation.")
         ds = write_pixels_to_dicom(ds, cleaned_pixels_final)
+
+        # ── Checkpoint: pixels redacted, tags still original ─────────────────
+        os.makedirs(os.path.dirname(before_output_path), exist_ok=True)
+        ds.save_as(before_output_path, write_like_original=False)
+        log.info(f"  [Checkpoint] Pixel-redacted DICOM saved (tags still original): {before_output_path}")
+
+        # ── Last: tag de-identification (hash PatientID, mask dates, etc.) ────
+        audit["deidentified_tags"] = deidentify_dataset(ds, keystore)
 
         # ── Save as DICOM ONLY ────────────────────────────────────────────────
         ds.save_as(output_path, write_like_original=False)

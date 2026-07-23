@@ -12,6 +12,8 @@ import os
 import logging
 
 # ─── Suppress verbose sub-library logs ───────────────────────────────────────
+os.environ["FLAGS_use_mkldnn"] = "0"
+os.environ["PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT"] = "0"
 os.environ["DISABLE_AUTO_LOGGING_CONFIG"] = "1"
 
 logging.basicConfig(
@@ -24,26 +26,24 @@ log = logging.getLogger("dicom_anonymizer")
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
-# Directory layout mirrors the container contract (/app/data, /app/config,
-# /app/output), overridable via env vars for local development. CONFIG_DIR is
-# reserved for future run-time overrides (e.g. an alternate tag_mapping.py or
-# PII pattern set); nothing reads from it yet.
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.environ.get("SKALD_DATA_DIR", os.path.join(BASE_DIR, "data"))
-CONFIG_DIR = os.environ.get("SKALD_CONFIG_DIR", os.path.join(BASE_DIR, "config"))
-OUTPUT_DIR = os.environ.get("SKALD_OUTPUT_DIR", os.path.join(BASE_DIR, "output"))
+# Batch mode: every .dcm file found directly under INPUT_DIR is processed.
+# Each gets its own output/<stem>/ folder (so multiple files never collide),
+# containing the same 5 files main.py has always produced for one file.
+INPUT_DIR = "input"
+OUTPUT_DIR = "output"
 
-# Persistent tokenisation/encryption key material — lives under OUTPUT_DIR
-# (not inside the source tree) so it survives across container runs via the
-# same volume mount that already persists /app/output on the host.
-KEYSTORE_DIR = os.path.join(OUTPUT_DIR, "keystore")
+BEFORE_OUTPUT_NAME = "before_deidentification.dcm"
+FINAL_OUTPUT_NAME = "after_deidentification.dcm"
+DATA_SNAPSHOT_NAME = "data.json"
+PHI_TAGS_SNAPSHOT_NAME = "phi_tags.json"
+PIPELINE_AUDIT_SNAPSHOT_NAME = "pipeline_audit.json"
 
-# Single-file defaults, used by main.py's debug/pixel-only mode.
-INPUT_DCM = os.path.join(DATA_DIR, "input.dcm")
-FINAL_OUTPUT_DCM = os.path.join(OUTPUT_DIR, "before_deidentification.dcm")
-DATA_SNAPSHOT = os.path.join(OUTPUT_DIR, "data.json")
-PHI_TAGS_SNAPSHOT = os.path.join(OUTPUT_DIR, "phi_tags.json")
-PIPELINE_AUDIT_SNAPSHOT = os.path.join(OUTPUT_DIR, "pipeline_audit.json")
+# Single consolidated file holding every hash/tokenise/encrypt key used by
+# de_identification/deidentify.py. One KeyStore is loaded from this file,
+# shared across every DICOM file in the batch, and saved back once at the
+# end -- so e.g. the same PatientID hashes/tokenises to the same value no
+# matter which file in the batch it appears in.
+SECURED_KEYSTORE_FILE = "secured.json"
 
 # Identifier fields that function as an ID but whose keyword doesn't end in
 # "ID"/"IDs" (so the generic suffix check below wouldn't catch them).

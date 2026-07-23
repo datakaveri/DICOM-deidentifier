@@ -40,6 +40,20 @@ def hash_hex(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def hash_hex_keyed(key: str, message: str) -> str:
+    """
+    Keyed double-hash, matching SKALD's nested_hash_hex (hashing_with_key
+    technique) exactly: hash(key + hash(key + message)) --
+    SHA-256(key + SHA-256(key + message)). The inner hash binds key and
+    message together first; the outer hash re-applies the key on top of that
+    result, rather than a single hash_hex(key + message) pass. `key` should
+    come from a CSPRNG (see keystore.get_or_create_hash_key / generate_random_key_hex,
+    os.urandom-backed, matching SKALD's /dev/urandom key generation).
+    """
+    inner = hash_hex(key + message)
+    return hash_hex(key + inner)
+
+
 # ── Value guards ─────────────────────────────────────────────────────────────
 
 def should_skip_value(value) -> bool:
