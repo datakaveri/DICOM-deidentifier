@@ -51,4 +51,36 @@ def enhance_image(image_8bit):
     except Exception:
         pass
 
+    # Full inversion — critical for light-text-on-dark-background
+    try:
+        variants["inverted"] = cv2.bitwise_not(image_8bit)
+    except Exception:
+        pass
+
+    # High-contrast CLAHE on inverted — maximizes text visibility on dark backgrounds
+    try:
+        inv = cv2.bitwise_not(image_8bit)
+        clahe_hi = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(4, 4))
+        variants["inverted_clahe"] = clahe_hi.apply(inv)
+    except Exception:
+        pass
+
+    # Morphological Top-Hat — isolates thin bright text strokes from varying bright backgrounds
+    try:
+        k_size = 15
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k_size, k_size))
+        tophat = cv2.morphologyEx(image_8bit, cv2.MORPH_TOPHAT, kernel)
+        variants["tophat"] = cv2.normalize(tophat, None, 0, 255, cv2.NORM_MINMAX)
+    except Exception:
+        pass
+
+    # Morphological Black-Hat — isolates thin dark text strokes from bright backgrounds
+    try:
+        k_size = 15
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k_size, k_size))
+        blackhat = cv2.morphologyEx(image_8bit, cv2.MORPH_BLACKHAT, kernel)
+        variants["blackhat"] = cv2.normalize(blackhat, None, 0, 255, cv2.NORM_MINMAX)
+    except Exception:
+        pass
+
     return variants
