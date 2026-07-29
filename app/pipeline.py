@@ -10,7 +10,7 @@ import datetime
 import numpy as np
 import pydicom
 
-from config import log
+from config import log, ENABLE_TAG_DEIDENTIFICATION
 from image_enhance import enhance_image
 from ocr_detect import detect_text
 from classify import merge_detections, classify_phi, _iou
@@ -181,7 +181,11 @@ def anonymize_dicom_file(input_path, before_output_path, output_path,
         log.info(f"  [Checkpoint] Pixel-redacted DICOM saved (tags still original): {before_output_path}")
 
         # ── Last: tag de-identification (hash PatientID, mask dates, etc.) ────
-        audit["deidentified_tags"] = deidentify_dataset(ds, keystore)
+        if ENABLE_TAG_DEIDENTIFICATION:
+            audit["deidentified_tags"] = deidentify_dataset(ds, keystore)
+        else:
+            log.info("  Tag de-identification skipped (DICOM header tags preserved 100% untouched).")
+            audit["deidentified_tags"] = []
 
         # ── Save as DICOM ONLY ────────────────────────────────────────────────
         ds.save_as(output_path, write_like_original=False)
