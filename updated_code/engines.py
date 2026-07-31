@@ -69,12 +69,14 @@ def initialize_engines(use_gpu=False):
                     print(f"  [WARN] PaddleOCR failed to init: {e3}")
 
     easy_ocr = None
-    if EASYOCR_AVAILABLE:
-        try:
-            easy_ocr = easyocr.Reader(['en'], gpu=use_gpu)
-            print("  [OK] EasyOCR initialized")
-        except Exception as e:
-            print(f"  [WARN] EasyOCR failed to init: {e}")
+    # Disabled EasyOCR to run in PaddleOCR-only mode (saves RAM & execution time)
+    # if EASYOCR_AVAILABLE:
+    #     try:
+    #         easy_ocr = easyocr.Reader(['en'], gpu=use_gpu)
+    #         print("  [OK] EasyOCR initialized")
+    #     except Exception as e:
+    #         print(f"  [WARN] EasyOCR failed to init: {e}")
+
 
     analyzer = None
     if PRESIDIO_AVAILABLE:
