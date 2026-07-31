@@ -26,12 +26,30 @@ log = logging.getLogger("dicom_anonymizer")
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
-INPUT_DCM = "input/input.dcm"
-BEFORE_OUTPUT_DCM = "output/before_deidentification.dcm"
-FINAL_OUTPUT_DCM = "output/after_deidentification.dcm"
-DATA_SNAPSHOT = "output/data.json"
-PHI_TAGS_SNAPSHOT = "output/phi_tags.json"
-PIPELINE_AUDIT_SNAPSHOT = "output/pipeline_audit.json"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.getenv("SKALD_DATA_DIR", os.path.join(BASE_DIR, "data"))
+CONFIG_DIR = os.getenv("SKALD_CONFIG_DIR", os.path.join(BASE_DIR, "config"))
+OUTPUT_DIR = os.getenv("SKALD_OUTPUT_DIR", os.path.join(BASE_DIR, "output"))
+KEYSTORE_DIR = os.path.join(OUTPUT_DIR, "keystore")
+
+INPUT_DIR = DATA_DIR
+
+BEFORE_OUTPUT_NAME = "before_deidentification.dcm"
+FINAL_OUTPUT_NAME = "after_deidentification.dcm"
+DATA_SNAPSHOT_NAME = "data.json"
+PHI_TAGS_SNAPSHOT_NAME = "phi_tags.json"
+PIPELINE_AUDIT_SNAPSHOT_NAME = "pipeline_audit.json"
+
+# Set to True to enable DICOM header tag de-identification (hashing/masking/FPE).
+# Set to False to keep all DICOM header tags 100% original and untouched (focusing solely on burned-in pixel text redaction).
+ENABLE_TAG_DEIDENTIFICATION = False
+
+# Single consolidated file holding every hash/tokenise/encrypt key used by
+# de_identification/deidentify.py. One KeyStore is loaded from this file,
+# shared across every DICOM file in the batch, and saved back once at the
+# end -- so e.g. the same PatientID hashes/tokenises to the same value no
+# matter which file in the batch it appears in.
+SECURED_KEYSTORE_FILE = "secured.json"
 
 # Identifier fields that function as an ID but whose keyword doesn't end in
 # "ID"/"IDs" (so the generic suffix check below wouldn't catch them).
