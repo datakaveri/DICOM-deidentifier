@@ -84,10 +84,24 @@ def detect_text(variants, paddle_ocr=None, easy_ocr=None):
     raw = []
 
     for name, img in variants.items():
-        if len(img.shape) == 2:
-            rgb = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+        h, w = img.shape[:2]
+        max_dim = 1500
+        if max(h, w) > max_dim:
+            scale = max_dim / float(max(h, w))
+            new_w = int(w * scale)
+            new_h = int(h * scale)
+            img_for_ocr = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+            log.info(f"            Resized variant '{name}' from {w}x{h} to {new_w}x{new_h} (scale={scale:.3f}) for OCR stability.")
         else:
-            rgb = img
+            scale = 1.0
+            img_for_ocr = img
+
+        if len(img_for_ocr.shape) == 2:
+            rgb = cv2.cvtColor(img_for_ocr, cv2.COLOR_GRAY2RGB)
+        else:
+            rgb = img_for_ocr
+
+        variant_raw = []
 
         # PaddleOCR — use new predict() API (ocr() is deprecated in PaddleX)
         if paddle_ocr:
@@ -102,7 +116,7 @@ def detect_text(variants, paddle_ocr=None, easy_ocr=None):
                         result = paddle_ocr.ocr(rgb, cls=False)
                 for det in _parse_paddle_result(result):
                     det["variant"] = name
-                    raw.append(det)
+                    variant_raw.append(det)
             except Exception as e:
                 log.debug(f"PaddleOCR failed on variant '{name}': {e}")
 
@@ -113,7 +127,7 @@ def detect_text(variants, paddle_ocr=None, easy_ocr=None):
                 for (bbox_pts, text, conf) in results:
                     pts = np.array(bbox_pts, dtype=np.int32)
                     xs = pts[:, 0]; ys = pts[:, 1]
-                    raw.append({
+                    variant_raw.append({
                         "text": str(text).strip(),
                         "bbox": [int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())],
                         "confidence": float(conf),
@@ -123,4 +137,18 @@ def detect_text(variants, paddle_ocr=None, easy_ocr=None):
             except Exception as e:
                 log.debug(f"EasyOCR failed on variant '{name}': {e}")
 
+        # Scale detections back to the original size
+        if scale != 1.0:
+            for det in variant_raw:
+                x1, y1, x2, y2 = det["bbox"]
+                det["bbox"] = [
+                    int(round(x1 / scale)),
+                    int(round(y1 / scale)),
+                    int(round(x2 / scale)),
+                    int(round(y2 / scale))
+                ]
+
+        raw.extend(variant_raw)
+
     return raw
+
