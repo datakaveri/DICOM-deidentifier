@@ -26,6 +26,7 @@ app/output/
 
 # Raw sample dataset — real patient DICOM files, never commit
 raw_telanagana_dicom_dataset/
+app/raw_burned_in_text_samples/
 
 # Ad-hoc visual inspection output (PNG previews of DICOM pixel data)
 preview/

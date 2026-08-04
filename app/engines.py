@@ -72,9 +72,17 @@ def initialize_engines(use_gpu=False):
     if EASYOCR_AVAILABLE:
         try:
             easy_ocr = easyocr.Reader(['en'], gpu=use_gpu)
-            print("  [OK] EasyOCR initialized")
+            print(f"  [OK] EasyOCR initialized (gpu={use_gpu})")
         except Exception as e:
-            print(f"  [WARN] EasyOCR failed to init: {e}")
+            if use_gpu:
+                try:
+                    easy_ocr = easyocr.Reader(['en'], gpu=False)
+                    print("  [OK] EasyOCR initialized (fallback to CPU)")
+                except Exception as e2:
+                    print(f"  [WARN] EasyOCR failed to init: {e2}")
+            else:
+                print(f"  [WARN] EasyOCR failed to init: {e}")
+
 
     analyzer = None
     if PRESIDIO_AVAILABLE:
