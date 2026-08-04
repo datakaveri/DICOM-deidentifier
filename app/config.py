@@ -73,7 +73,7 @@ PII_PATTERNS = {
     "aadhaar":     r'\b\d{4}\s?\d{4}\s?\d{4}\b',
     "abha":        r'\b\d{2}-\d{4}-\d{4}-\d{4}\b',
     "phone":       r'\b(?:\+91|0)?[6-9]\d{9}\b',
-    "date":        r'\b\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}\b',
+    "date":        r'\b\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}\b|\b\d{4}[-/.]\d{1,2}[-/.]\d{1,2}\b',
     "uhid_mrn":    r'\b(?:UHID|MRN|REG|IPD|OPD|CR|PID|HID)[\s:/-]?\d+\b',
     "age_sex":     r'\b\d{1,3}\s*[/]\s*[MFO]\b',
     "name_prefix": r'\b(?:DR\.?|MR\.?|MRS\.?|MS\.?|SHRI|SMT|S/O|D/O|W/O)\b',

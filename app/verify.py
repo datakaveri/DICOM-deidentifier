@@ -6,9 +6,9 @@ image to confirm zero residual PHI text, escalating redaction if needed.
 import numpy as np
 
 from config import log
-from image_enhance import enhance_image
-from ocr_detect import detect_text
-from classify import merge_detections, classify_phi
+from text_region_detect import detect_text_regions
+from ocr_detect import detect_text_in_regions
+from classify import merge_detections, classify_phi, expand_phi_blocks
 from masking import _redact_border_zone, _redact_anatomy_zone
 
 
@@ -22,10 +22,11 @@ def verify_redaction(cleaned_array, phi_regions, paddle_ocr, easy_ocr, analyzer)
     else:
         temp_8 = cleaned_array.astype(np.uint8)
 
-    variants    = enhance_image(temp_8)
-    raw_det     = detect_text(variants, paddle_ocr, easy_ocr)
+    regions     = detect_text_regions(temp_8)
+    raw_det     = detect_text_in_regions(temp_8, regions, paddle_ocr, easy_ocr)
     merged      = merge_detections(raw_det)
     residual    = classify_phi(merged, cleaned_array.shape, analyzer)
+    residual    = expand_phi_blocks(merged, residual, cleaned_array.shape)
 
     if not residual:
         log.info("  [Stage 6] PASSED — no residual PHI text detected.")
@@ -73,9 +74,11 @@ def verify_redaction(cleaned_array, phi_regions, paddle_ocr, easy_ocr, analyzer)
     else:
         esc_8 = escalated.astype(np.uint8)
 
-    v2_det    = detect_text(enhance_image(esc_8), paddle_ocr, easy_ocr)
+    v2_regions = detect_text_regions(esc_8)
+    v2_det     = detect_text_in_regions(esc_8, v2_regions, paddle_ocr, easy_ocr)
     v2_merged = merge_detections(v2_det)
     v2_phi    = classify_phi(v2_merged, escalated.shape, analyzer)
+    v2_phi    = expand_phi_blocks(v2_merged, v2_phi, escalated.shape)
 
     if not v2_phi:
         log.info("  [Stage 6] PASSED (Escalated — all residual text cleared).")

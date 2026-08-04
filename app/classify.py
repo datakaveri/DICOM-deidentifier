@@ -102,6 +102,73 @@ def merge_detections(raw, iou_thresh=0.3):
     return merged
 
 
+def _zone_for_bbox(bbox, w, h):
+    y_mid = (bbox[1] + bbox[3]) / 2.0
+    x_mid = (bbox[0] + bbox[2]) / 2.0
+    in_border = (
+        y_mid < h * 0.25 or y_mid > h * 0.75 or
+        x_mid < w * 0.15 or x_mid > w * 0.85
+    )
+    return "border" if in_border else "anatomy"
+
+
+def expand_phi_blocks(merged, phi_regions, image_shape):
+    """
+    Groups `merged` detections into vertically-stacked text blocks (adjacent
+    lines, overlapping horizontally -- e.g. a burned-in "Name:" / "ID:" /
+    "Date:" header) and, if any line in a block was classified as PHI,
+    redacts the rest of that block too.
+
+    OCR misreads individual words often enough (garbling "Name:" while
+    reading "ID:"/"Date:" on the same block correctly) that per-line
+    classification alone can leave a sibling line of an otherwise-redacted
+    demographic block exposed.
+    """
+    if not merged:
+        return phi_regions
+
+    h, w = image_shape[:2]
+    boxes = [d["bbox"] for d in merged]
+    order = sorted(range(len(boxes)), key=lambda i: boxes[i][1])
+
+    clusters = []
+    current = [order[0]]
+    for idx in order[1:]:
+        prev_box, box = boxes[current[-1]], boxes[idx]
+        prev_h = prev_box[3] - prev_box[1]
+        gap = box[1] - prev_box[3]
+        x_overlap = max(0, min(prev_box[2], box[2]) - max(prev_box[0], box[0]))
+        min_w = min(prev_box[2] - prev_box[0], box[2] - box[0])
+        overlap_ratio = x_overlap / min_w if min_w > 0 else 0
+        if gap <= 1.8 * max(prev_h, 1) and overlap_ratio >= 0.3:
+            current.append(idx)
+        else:
+            clusters.append(current)
+            current = [idx]
+    clusters.append(current)
+
+    phi_bboxes = {tuple(r["bbox"]) for r in phi_regions}
+    added = 0
+    for cluster in clusters:
+        if len(cluster) < 2:
+            continue
+        cluster_bboxes = [tuple(boxes[i]) for i in cluster]
+        has_phi = any(b in phi_bboxes for b in cluster_bboxes)
+        all_phi = all(b in phi_bboxes for b in cluster_bboxes)
+        if has_phi and not all_phi:
+            for i in cluster:
+                b = tuple(boxes[i])
+                if b not in phi_bboxes:
+                    zone = _zone_for_bbox(list(b), w, h)
+                    log.info(f"    REDACT-{zone.upper()} (block_expand): '{merged[i]['text']}' @ {list(b)}")
+                    phi_regions.append({"text": merged[i]["text"], "bbox": list(b), "zone": zone})
+                    phi_bboxes.add(b)
+                    added += 1
+    if added:
+        log.info(f"    Block-expand: redacting {added} additional sibling line(s) in flagged text blocks")
+    return phi_regions
+
+
 def _is_clinical(text):
     val = text.strip().upper()
     if re.match(r'^(?:L|R|LT|RT|LA|RA|LP|RP|PA|AP|LL|RL|A|P)\s*\d*$', val):
@@ -234,7 +301,7 @@ def classify_phi(merged, image_shape, analyzer=None, gliner_model=None, medical_
         regex_reasons = []
 
         generic_demographic_labels = [
-            "NAME", "PATIENT", "DOB", "D0B", "0B:", "BIRTH", "MRN", "UHID", "PID", "AGE", "SEX", "GENDER",
+            "NAME", "PATIENT", "DATE", "DOB", "D0B", "0B:", "BIRTH", "MRN", "UHID", "PID", "AGE", "SEX", "GENDER",
             "MALE", "FEMALE", "DR.", "DOCTOR", "PHYSICIAN", "HOSPITAL", "HOSP", "CLINIC", "INSTITUT",
             "CONFIDENTIAL", "CONFIDCNTTIAC", "RESTRICTED", "PROPRIETARY", "SECRET"
         ]
@@ -327,12 +394,7 @@ def classify_phi(merged, image_shape, analyzer=None, gliner_model=None, medical_
 
         # ── Phase 4: Spatial / Default Fallback ──────────────────────────────
         if not classified:
-            y_mid = (bbox[1] + bbox[3]) / 2.0
-            x_mid = (bbox[0] + bbox[2]) / 2.0
-            in_border = (
-                y_mid < h * 0.25 or y_mid > h * 0.75 or
-                x_mid < w * 0.15 or x_mid > w * 0.85
-            )
+            in_border = _zone_for_bbox(bbox, w, h) == "border"
             if in_border and re.search(r'[A-Za-z]', clean_text):
                 is_phi = True
                 reason.append("fallback:suspect_border")
@@ -341,7 +403,7 @@ def classify_phi(merged, image_shape, analyzer=None, gliner_model=None, medical_
                 reason.append("fallback:safe_anatomy")
 
         if is_phi:
-            zone = "border" if (bbox[1] + bbox[3])/2.0 < h * 0.25 or (bbox[1] + bbox[3])/2.0 > h * 0.75 or (bbox[0] + bbox[2])/2.0 < w * 0.15 or (bbox[0] + bbox[2])/2.0 > w * 0.85 else "anatomy"
+            zone = _zone_for_bbox(bbox, w, h)
             log.info(f"    REDACT-{zone.upper()} ({', '.join(reason)}): '{text}' @ {bbox}")
             phi_regions.append({"text": text, "bbox": bbox, "zone": zone})
         else:

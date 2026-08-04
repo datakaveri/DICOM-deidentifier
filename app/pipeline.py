@@ -11,9 +11,9 @@ import numpy as np
 import pydicom
 
 from config import log, ENABLE_TAG_DEIDENTIFICATION
-from image_enhance import enhance_image
-from ocr_detect import detect_text
-from classify import merge_detections, classify_phi, _iou
+from text_region_detect import detect_text_regions
+from ocr_detect import detect_text_in_regions
+from classify import merge_detections, classify_phi, expand_phi_blocks, _iou
 from phi_tags import load_original_tag_values, match_against_stored_tags
 from masking import redact_pixels
 from verify import verify_redaction
@@ -110,19 +110,21 @@ def anonymize_dicom_file(input_path, before_output_path, output_path,
             ocr_frame = norm_8
             ocr_pixels = pixels
 
-        # ── Stage 2: Enhancement ──────────────────────────────────────────────
-        log.info("  [Stage 2] Generating enhanced image variants...")
-        variants = enhance_image(ocr_frame)
+        # ── Stage 2: Text region detection (shape-based, no OCR) ──────────────
+        log.info("  [Stage 2] Detecting candidate text regions...")
+        text_regions = detect_text_regions(ocr_frame)
+        log.info(f"            Candidate regions: {len(text_regions)}")
 
         # ── Stage 3: OCR ──────────────────────────────────────────────────────
-        log.info("  [Stage 3] Running OCR text detection...")
-        raw_det = detect_text(variants, paddle_ocr, easy_ocr)
+        log.info("  [Stage 3] Running OCR text detection on candidate regions...")
+        raw_det = detect_text_in_regions(ocr_frame, text_regions, paddle_ocr, easy_ocr)
         log.info(f"            Raw detections: {len(raw_det)}")
 
         # ── Stage 4: Classify ─────────────────────────────────────────────────
         log.info("  [Stage 4] Classifying detections (PHI vs clinical)...")
         merged     = merge_detections(raw_det)
         phi_regions = classify_phi(merged, ocr_frame.shape, analyzer)
+        phi_regions = expand_phi_blocks(merged, phi_regions, ocr_frame.shape)
         log.info(f"            PHI regions to redact: {len(phi_regions)}")
 
         # ── Step 3: match OCR text against the full original-tag backup ────────
