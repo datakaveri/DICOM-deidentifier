@@ -8,13 +8,14 @@ Each entry is keyed by (group, element) as ints and describes:
   technique — the primary technique applied (see operations.py for the
               executable implementation of each):
                 suppress    | element dropped entirely
-                hash        | SHA-256 (or, for UI-VR tags, a deterministic
-                              DICOM-valid pseudo-UID derived from SHA-256)
+                hash        | keyed double-hash hash(key + hash(key + value))
+                              (or, for UI-VR tags, a deterministic DICOM-valid
+                              pseudo-UID derived from the same digest)
                 tokenise    | sequential opaque token via a reversible vault
                 encrypt     | pseudo-encryption, XOR keystream ("ENC$" hex)
                 encrypt_fpe | format-preserving encryption (keeps length/charset)
                 charcloak   | per-character random substitution, same class
-                mask        | partial redaction (dates: blank the day)
+                mask        | partial redaction (dates: retain year, blank month/day)
                 scrub       | "Remove PII and retain": regex-redact PII
                               spans in free text, keep the rest
                 retain      | no transformation
@@ -98,7 +99,7 @@ TAG_MAPPING = {
     (0x0010, 0x21B0): {"name": "Additional Patient History", "technique": SCRUB,
                         "reason": "Free text likely to contain PII; anonymise as free text."},
     (0x0010, 0x21D0): {"name": "Last Menstrual Date", "technique": MASK,
-                        "reason": "Date quasi-identifier; retain year/month, blank day if clinically needed."},
+                        "reason": "Date quasi-identifier; retain year, blank month/day."},
     (0x0010, 0x4000): {"name": "Patient Comments", "technique": SUPPRESS,
                         "reason": "Free text; high PII risk, no structured value."},
     (0x0010, 0x1090): {"name": "Medical Record Locator", "technique": SUPPRESS,
@@ -178,8 +179,8 @@ TAG_MAPPING = {
 
     # 4. Dates & times
     (0x0008, 0x0020): {"name": "Study Date", "technique": MASK,
-                        "reason": "Retain year (and month if needed), blank day; temporal "
-                                  "cohort is analytically useful."},
+                        "reason": "Retain year (temporal cohort stays analytically useful), "
+                                  "blank month/day to remove the exact study date."},
     (0x0008, 0x0021): {"name": "Series Date", "technique": MASK,
                         "reason": "Same rationale; keep consistent masking across a study."},
     (0x0008, 0x0022): {"name": "Acquisition Date", "technique": MASK, "reason": "Same rationale."},

@@ -5,11 +5,17 @@ transform steps in preprocess/mod.rs, adapted from "one technique per CSV
 column" to "one technique per DICOM tag".
 
 Design notes:
-  - hash is plain, unsalted SHA-256 (crypto.hash_hex). This keeps it
-    deterministic across separate script runs (no salt state to lose),
-    which is required so Study/Series/SOP/Frame-of-Reference UID hashes
-    stay consistent whenever the *same* original UID is re-hashed while
-    de-identifying multiple files of the same study.
+  - hash implements SKALD's hashing_with_key technique exactly:
+    nested_hash_hex(key, value) = hash(key + hash(key + value))
+    (crypto.hash_hex_keyed), NOT the separate hashing_with_salt technique
+    (single hash_hex(salt + value) pass, salt not persisted). The key is
+    per-column (one per DICOM tag/keyword, via keystore.get_or_create_hash_key)
+    and CSPRNG-generated (crypto.generate_random_key_hex, os.urandom-backed —
+    same source and generator SKALD uses for hash_keys.json via
+    /dev/urandom), persisted in the shared KeyStore's secured.json so it
+    survives across every file in a batch *and* across future runs reusing
+    that same file — hashes stay deterministic (same PatientID -> same hash)
+    while the key itself is never derivable from the DICOM data being hashed.
   - UID-VR tags (and any tag in tag_mapping.UID_VALUED_TAGS) are hashed
     into a syntactically valid DICOM UID ("2.25.<int>", the standard
     UUID-derived-UID form — see PS3.5 Annex B) instead of a raw hex
@@ -24,7 +30,7 @@ from .tag_mapping import (
     SUPPRESS, HASH, TOKENISE, ENCRYPT, ENCRYPT_FPE, CHARCLOAK, MASK, SCRUB, RETAIN,
     UID_VALUED_TAGS,
 )
-from .crypto import hash_hex, pseudo_encrypt, format_preserving_encrypt_general, randomize_preserving_class
+from .crypto import hash_hex_keyed, pseudo_encrypt, format_preserving_encrypt_general, randomize_preserving_class
 from .masking import MaskingConfigLite, RegexPatternConfig, RegexPatternKind, apply_masking_value
 
 # Max character length per VR (DICOM PS3.5 Table 6.2-1), used to keep
@@ -36,13 +42,16 @@ VR_MAX_LENGTH = {
 }
 
 # ── "mask" technique config: DA-VR dates (YYYYMMDD) ─────────────────────────
-# Retains year+month, zeroes the day (chars 7-8) via the "characters" step —
-# same masking.py engine SKALD uses for CSV columns, just configured for a
-# DICOM date instead of a delimiter-bound column.
+# Retains the year (chars 1-4), zeroing month+day (chars 5-8), via the
+# "characters" step — same masking.py engine SKALD uses for CSV columns,
+# just configured for a DICOM date instead of a delimiter-bound column.
+# Matches the source mapping's stated intent for date fields: keep the year
+# (age-cohort/temporal-trend analysis stays possible) while removing the
+# exact month/day.
 DATE_MASK_CONFIG = MaskingConfigLite(
     column="dicom_date",
     masking_char="0",
-    characters_to_mask=[7, 8],
+    characters_to_mask=[5, 6, 7, 8],
     apply_order=["characters"],
 )
 
@@ -72,22 +81,25 @@ FREE_TEXT_SCRUB_CONFIG = MaskingConfigLite(
 )
 
 
-def hash_to_uid(value: str) -> str:
+def hash_to_uid(value: str, key: str) -> str:
     """
     Deterministically derives a valid DICOM UID ('2.25.<int>') from `value`,
-    using the same SKALD-ported crypto.hash_hex() as every other hash
-    technique — just reshaped into a dotted-numeric UID afterwards, since a
-    UI-VR element can't hold a raw hex digest.
+    using the keyed double-hash hash(key + hash(key + value)) — just
+    reshaped into a dotted-numeric UID afterwards, since a UI-VR element
+    can't hold a raw hex digest.
     """
-    digest_hex = hash_hex(value)
+    digest_hex = hash_hex_keyed(key, value)
     digest_bytes = bytes.fromhex(digest_hex)[:16]
     derived = uuid.UUID(bytes=digest_bytes)
     return ("2.25." + str(derived.int))[:64]
 
 
-def hash_value(value: str, vr: str) -> str:
-    """Hex SHA-256 digest of `value`, truncated to fit VR's max length."""
-    digest = hash_hex(value)
+def hash_value(value: str, vr: str, key: str) -> str:
+    """
+    Keyed double-hash of `value` (hash(key + hash(key + value))), truncated
+    to fit VR's max length.
+    """
+    digest = hash_hex_keyed(key, value)
     max_len = VR_MAX_LENGTH.get(vr, 64)
     return digest[:max_len]
 
@@ -105,9 +117,10 @@ def apply_technique(technique: str, value: str, elem, keystore, tag_id) -> str:
         return value
 
     if technique == HASH:
+        key = keystore.get_or_create_hash_key(column)
         if tag_id in UID_VALUED_TAGS or elem.VR == "UI":
-            return hash_to_uid(value)
-        return hash_value(value, elem.VR)
+            return hash_to_uid(value, key)
+        return hash_value(value, elem.VR, key)
 
     if technique == TOKENISE:
         return keystore.tokenise(column, value)

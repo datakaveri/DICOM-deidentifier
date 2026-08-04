@@ -72,24 +72,23 @@ def initialize_engines(use_gpu=False):
     if EASYOCR_AVAILABLE:
         try:
             easy_ocr = easyocr.Reader(['en'], gpu=use_gpu)
-            print("  [OK] EasyOCR initialized")
+            print(f"  [OK] EasyOCR initialized (gpu={use_gpu})")
         except Exception as e:
-            print(f"  [WARN] EasyOCR failed to init: {e}")
+            if use_gpu:
+                try:
+                    easy_ocr = easyocr.Reader(['en'], gpu=False)
+                    print("  [OK] EasyOCR initialized (fallback to CPU)")
+                except Exception as e2:
+                    print(f"  [WARN] EasyOCR failed to init: {e2}")
+            else:
+                print(f"  [WARN] EasyOCR failed to init: {e}")
+
 
     analyzer = None
     if PRESIDIO_AVAILABLE:
         try:
-            # AnalyzerEngine() defaults to spacy's en_core_web_lg (~600MB) if
-            # not told otherwise. We only install en_core_web_sm (~12MB), so
-            # pin the NLP engine to it explicitly instead of triggering an
-            # unwanted large-model download.
-            from presidio_analyzer.nlp_engine import NlpEngineProvider
-            nlp_engine = NlpEngineProvider(nlp_configuration={
-                "nlp_engine_name": "spacy",
-                "models": [{"lang_code": "en", "model_name": "en_core_web_sm"}],
-            }).create_engine()
-            analyzer = AnalyzerEngine(nlp_engine=nlp_engine)
-            print("  [OK] Presidio NLP Analyzer initialized (en_core_web_sm)")
+            analyzer = AnalyzerEngine()
+            print("  [OK] Presidio NLP Analyzer initialized")
         except Exception as e:
             print(f"  [WARN] Presidio failed to init: {e}")
 
