@@ -8,11 +8,11 @@ __pycache__/
 *.pyc
 .pytest_cache/
 
-app/data/*
-!app/data/.gitkeep
+data/*
+!data/.gitkeep
 app/config/*
 !app/config/.gitkeep
-app/output/
+output/
 app/de_identification/keystore/
 
 raw_telanagana_dicom_dataset/

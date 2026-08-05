@@ -27,19 +27,25 @@ log = logging.getLogger("dicom_anonymizer")
 # CONFIGURATION
 # =============================================================================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.getenv("SKALD_DATA_DIR", os.path.join(BASE_DIR, "data"))
+PROJECT_ROOT = os.path.dirname(BASE_DIR)
+DATA_DIR = os.getenv("SKALD_DATA_DIR", os.path.join(PROJECT_ROOT, "data"))
 CONFIG_DIR = os.getenv("SKALD_CONFIG_DIR", os.path.join(BASE_DIR, "config"))
-OUTPUT_DIR = os.getenv("SKALD_OUTPUT_DIR", os.path.join(BASE_DIR, "output"))
+OUTPUT_DIR = os.getenv("SKALD_OUTPUT_DIR", os.path.join(PROJECT_ROOT, "output"))
 KEYSTORE_DIR = os.path.join(OUTPUT_DIR, "keystore")
 
 INPUT_DIR = DATA_DIR
 
+# Working filenames used only in a per-file temp directory during processing
+# (never written to OUTPUT_DIR — see main.py). OUTPUT_DIR gets exactly two
+# files per input: FINAL_OUTPUT_NAME and STATUS_SNAPSHOT_NAME.
 BEFORE_OUTPUT_NAME = "before_deidentification.dcm"
-FINAL_OUTPUT_NAME = "after_deidentification.dcm"
 DATA_SNAPSHOT_NAME = "data.json"
 PHI_TAGS_SNAPSHOT_NAME = "phi_tags.json"
-PIPELINE_AUDIT_SNAPSHOT_NAME = "pipeline_audit.json"
 BBOX_IMAGE_NAME = "bbox_regions.png"
+
+# The only two files written to OUTPUT_DIR/<stem>/.
+FINAL_OUTPUT_NAME = "output.dcm"
+STATUS_SNAPSHOT_NAME = "status.json"
 
 # Set to True to enable DICOM header tag de-identification (hashing/masking/FPE).
 # Set to False to keep all DICOM header tags 100% original and untouched (focusing solely on burned-in pixel text redaction).

@@ -11,12 +11,14 @@ The output is always a valid `.dcm` file — never a PNG/JPEG export — so down
 
 ```
 app/
-  main.py                  # debug entrypoint: pixel redaction only, single file (app/data/input.dcm)
+  main.py                  # debug entrypoint: pixel redaction only, single file (data/input.dcm)
   de_identification/run.py # main entrypoint: full pipeline, batches every *.dcm under DATA_DIR
   config.py                # paths (env-var overridable), PII patterns, clinical allowlist
   pipeline.py               # 7-stage pixel redaction pipeline
   de_identification/        # tag-level de-identification (hashing, tokenisation, FPE, keystore)
-  data/, config/, output/    # local dev mirror of the container's mounted volumes
+  config/                   # local dev mirror of the container's mounted config volume
+data/                       # input DICOM files (local dev mirror of the container's mounted volume)
+output/                     # results, audit logs, keystore (local dev mirror of the container's mounted volume)
 tests/                      # pytest suite
 Dockerfile
 requirements.txt
@@ -29,12 +31,12 @@ python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
 python -m spacy download en_core_web_sm
 
-# Drop one or more .dcm files into app/data/, then:
+# Drop one or more .dcm files into data/, then:
 cd app
 python -m de_identification.run
 ```
 
-Results land under `app/output/<filename>/`: `data.json` (original tag snapshot), `phi_tags.json` (identified PHI tags), `before_deidentification.dcm` (pixel-redacted), `after_deidentification.dcm` (pixel-redacted + tag de-identified), `pipeline_audit.json`, and `tag_audit.json`. A run-level `app/output/manifest.json` summarizes every file processed. Tokenisation/encryption keys persist in `app/output/keystore/` across runs.
+Results land under `output/<filename>/`: `data.json` (original tag snapshot), `phi_tags.json` (identified PHI tags), `before_deidentification.dcm` (pixel-redacted), `after_deidentification.dcm` (pixel-redacted + tag de-identified), `pipeline_audit.json`, and `tag_audit.json`. A run-level `output/manifest.json` summarizes every file processed. Tokenisation/encryption keys persist in `output/keystore/` across runs.
 
 ## Running with Docker
 
@@ -42,21 +44,21 @@ Results land under `app/output/<filename>/`: `data.json` (original tag snapshot)
 docker build -t skald-dicom .
 
 docker run --rm \
-  -v /path/to/input/dicoms:/app/data \
+  -v /path/to/input/dicoms:/data \
   -v /path/to/config:/app/config \
-  -v /path/to/output:/app/output \
+  -v /path/to/output:/output \
   skald-dicom
 ```
 
-The container processes every `.dcm` file found under `/app/data` (recursively) and writes results to `/app/output`, in the same layout described above. OCR/NLP model weights are baked into the image at build time, so the container needs no outbound network access at runtime — this matters for air-gapped/TEE deployments.
+The container processes every `.dcm` file found under `/data` (recursively) and writes results to `/output`, in the same layout described above. OCR/NLP model weights are baked into the image at build time, so the container needs no outbound network access at runtime — this matters for air-gapped/TEE deployments.
 
 Environment variables (already set in the image, override if needed):
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `SKALD_DATA_DIR` | `/app/data` | Input DICOM files (recursively scanned for `*.dcm`) |
+| `SKALD_DATA_DIR` | `/data` | Input DICOM files (recursively scanned for `*.dcm`) |
 | `SKALD_CONFIG_DIR` | `/app/config` | Reserved for future run-time config overrides |
-| `SKALD_OUTPUT_DIR` | `/app/output` | Per-file results, audit logs, and the persistent keystore |
+| `SKALD_OUTPUT_DIR` | `/output` | Per-file results, audit logs, and the persistent keystore |
 
 ## Testing
 
@@ -68,4 +70,4 @@ pytest
 
 - Tag values are never modified by the pixel pipeline — only private/vendor tags are stripped and UIDs regenerated, so a file can't be linked back to the original study before tag-level de-identification runs.
 - The tag-level de-identification technique per field is explicit and auditable in `tag_mapping.py` — nothing is inferred at runtime.
-- `app/de_identification/keystore/` (tokenisation/encryption key material) is never committed to git — it's runtime state, mounted or persisted via `/app/output` in the container.
+- `output/keystore/` (tokenisation/encryption key material) is never committed to git — it's runtime state, mounted or persisted via `/output` in the container.

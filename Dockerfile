@@ -1,8 +1,8 @@
 # SKALD-DICOM — DICOM burned-in text + tag de-identification pipeline.
 #
-# Runs as a batch job: reads every *.dcm file under /app/data, applies pixel
+# Runs as a batch job: reads every *.dcm file under /data, applies pixel
 # (OCR-based burned-in text redaction) and tag-level (hash/tokenise/encrypt)
-# de-identification, and writes results + audit logs under /app/output.
+# de-identification, and writes results + audit logs under /output.
 #
 # CPU-only by default (see the torch install step below) — no CUDA/nvidia
 # runtime required. To build a GPU variant, swap the CPU torch wheel below
@@ -51,11 +51,11 @@ COPY app/ .
 # deployments). Needs network access during `docker build` only.
 RUN python -c "from engines import check_gpu_available, initialize_engines; initialize_engines(use_gpu=check_gpu_available())"
 
-RUN mkdir -p /app/data /app/config /app/output
+RUN mkdir -p /data /app/config /output
 
-ENV SKALD_DATA_DIR=/app/data \
+ENV SKALD_DATA_DIR=/data \
     SKALD_CONFIG_DIR=/app/config \
-    SKALD_OUTPUT_DIR=/app/output \
+    SKALD_OUTPUT_DIR=/output \
     PYTHONUNBUFFERED=1
 
 CMD ["python", "-m", "de_identification.run"]

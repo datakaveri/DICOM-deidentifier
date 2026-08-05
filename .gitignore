@@ -18,11 +18,11 @@ ENV/
 
 # Runtime data/config/output — mounted volumes in deployment, local scratch
 # space in development. Never commit patient DICOM data or key material.
-app/data/*
-!app/data/.gitkeep
+data/*
+!data/.gitkeep
 app/config/*
 !app/config/.gitkeep
-app/output/
+output/
 
 # Raw sample dataset — real patient DICOM files, never commit
 raw_telanagana_dicom_dataset/
