@@ -16,8 +16,13 @@ Policy (per the PDF's own notes):
   - Private tags (odd group number) are always suppressed, matching the
     PDF's default private-tag policy, and this pipeline's existing
     metadata.py Stage-1 behaviour (ds.remove_private_tags()).
-  - Standard tags with no entry in TAG_MAPPING are left completely
-    untouched (safer than guessing at an unlisted tag's sensitivity).
+  - Standard tags with no entry in TAG_MAPPING are left untouched, EXCEPT
+    any date-shaped tag (VR "DA"/"DT", or keyword containing "date") -- the
+    DICOM standard defines ~100 of these (StudyArrivalDate,
+    DateOfLastCalibration, ScheduledProcedureStepStartDate, ...) and
+    TAG_MAPPING only lists the handful that show up routinely, so an
+    unlisted one must still be masked/suppressed rather than silently
+    leaking an exact date. See _fallback_date_mapping() below.
 
 Unlike combine.py (which deliberately never mutates tag values, relying
 only on private-tag stripping + pixel redaction), this module performs the
@@ -26,9 +31,27 @@ as an additional metadata pass alongside — not instead of — the pixel
 pipeline.
 """
 
-from .tag_mapping import TAG_MAPPING, SUPPRESS
+from .tag_mapping import TAG_MAPPING, SUPPRESS, MASK
 from .operations import apply_technique
 from .crypto import should_skip_value
+
+
+def _fallback_date_mapping(elem) -> dict:
+    """
+    Catch-all for date-shaped tags with no TAG_MAPPING entry: VR "DA"
+    (date) and "DT" (datetime) are masked the same way as the explicitly
+    listed date tags (retain year, blank month/day) since they're always
+    an 8+-char YYYYMMDD[...] string. A tag whose keyword merely contains
+    "date" but isn't DA/DT VR (e.g. PatientBirthDateInAlternativeCalendar,
+    a free-text LO field) isn't a fixed format masking can safely target,
+    so it's suppressed outright instead of guessing at a partial redaction.
+    Returns None for anything that isn't date-shaped.
+    """
+    if elem.VR in ("DA", "DT"):
+        return {"technique": MASK}
+    if "date" in (elem.keyword or "").lower():
+        return {"technique": SUPPRESS}
+    return None
 
 
 def deidentify_dataset(ds, keystore) -> list:
@@ -73,9 +96,9 @@ def _walk(ds, keystore, audit) -> None:
             del ds[elem.tag]
             continue
 
-        mapping = TAG_MAPPING.get(tag_id)
+        mapping = TAG_MAPPING.get(tag_id) or _fallback_date_mapping(elem)
         if not mapping:
-            continue  # unmapped standard tag: left untouched
+            continue  # unmapped, non-date standard tag: left untouched
 
         technique = mapping["technique"]
 

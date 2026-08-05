@@ -42,7 +42,7 @@ VR_MAX_LENGTH = {
 }
 
 # ── "mask" technique config: DA-VR dates (YYYYMMDD) ─────────────────────────
-# Retains the year (chars 1-4), zeroing month+day (chars 5-8), via the
+# Retains the year (chars 1-4), starring out month+day (chars 5-8), via the
 # "characters" step — same masking.py engine SKALD uses for CSV columns,
 # just configured for a DICOM date instead of a delimiter-bound column.
 # Matches the source mapping's stated intent for date fields: keep the year
@@ -50,7 +50,7 @@ VR_MAX_LENGTH = {
 # exact month/day.
 DATE_MASK_CONFIG = MaskingConfigLite(
     column="dicom_date",
-    masking_char="0",
+    masking_char="*",
     characters_to_mask=[5, 6, 7, 8],
     apply_order=["characters"],
 )
