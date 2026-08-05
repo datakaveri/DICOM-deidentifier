@@ -149,15 +149,109 @@ def _inpaint_16bit(image_16, mask_8, radius=9, method=cv2.INPAINT_NS):
 
 
 def _redact_border_zone(cleaned, x1, y1, x2, y2):
-    """Border zone strategy: background median fill."""
+    """
+    Border zone strategy: pre-conditioned inpainting.
+
+    Problem: border text bboxes often sit adjacent to bright anatomy.
+    Standard inpainting propagates that brightness into the dark border.
+    Post-clamping fixes the brightness but kills texture, creating a flat patch.
+
+    Solution: PRE-CONDITION the ROI margins before inpainting.
+      1. Save original ROI margin pixels
+      2. Temporarily replace bright margin pixels with the local dark
+         background value — this makes inpainting only sample from dark
+         pixels, preventing anatomy bleed
+      3. Build character stroke mask + inpaint (same as anatomy zone)
+      4. Restore original margin pixels — anatomy edges are untouched
+
+    Result: natural inpainting texture (not flat) AND no bright artifacts.
+    """
     h, w = cleaned.shape[:2]
-    pad = 20
-    ctx = cleaned[
-        max(0, y1 - pad):min(h, y2 + pad),
-        max(0, x1 - pad):min(w, x2 + pad)
-    ]
-    fill_val = int(np.median(ctx))
-    cleaned[y1:y2, x1:x2] = fill_val
+    pad = 8
+    rx1, rx2 = max(0, x1 - pad), min(w, x2 + pad)
+    ry1, ry2 = max(0, y1 - pad), min(h, y2 + pad)
+
+    roi = cleaned[ry1:ry2, rx1:rx2].copy()
+    roi_h, roi_w = roi.shape[:2]
+    if roi_h < 3 or roi_w < 3:
+        return cleaned
+
+    # Save original margins for restoration after inpainting
+    roi_original = roi.copy()
+
+    # Inner bbox coordinates within the ROI
+    iy1 = max(0, pad)
+    iy2 = min(roi_h, pad + (y2 - y1))
+    ix1 = max(0, pad)
+    ix2 = min(roi_w, pad + (x2 - x1))
+
+    # ── Sample the dark background level ──────────────────────────────────
+    # Look at the ENTIRE top-left quadrant of the image (guaranteed dark border)
+    # to get a reliable dark background reference, not the local context which
+    # may be contaminated by anatomy.
+    border_sample_h = max(1, h // 6)
+    border_sample_w = max(1, w // 6)
+    top_left = cleaned[0:border_sample_h, 0:border_sample_w]
+    if top_left.size > 0:
+        bg_val = int(np.median(top_left))
+    else:
+        bg_val = int(np.percentile(cleaned, 10))
+
+    bg_ceiling = bg_val + max(8, int(abs(bg_val) * 0.25))
+
+    # ── PRE-CONDITION: darken bright anatomy in the ROI margins ───────────
+    # This prevents inpainting from sampling bright anatomy pixels as source.
+    # Only darken the MARGIN strip (outside the text bbox) — inside the bbox
+    # the text itself will be handled by the character mask.
+    #
+    # Top margin
+    margin = roi[0:iy1, :]
+    margin[margin > bg_ceiling] = bg_val
+    # Bottom margin
+    margin = roi[iy2:, :]
+    margin[margin > bg_ceiling] = bg_val
+    # Left margin
+    margin = roi[iy1:iy2, 0:ix1]
+    margin[margin > bg_ceiling] = bg_val
+    # Right margin
+    margin = roi[iy1:iy2, ix2:]
+    margin[margin > bg_ceiling] = bg_val
+
+    # ── Build character stroke mask (same logic as anatomy zone) ──────────
+    roi_min, roi_max = float(roi.min()), float(roi.max())
+    if roi_max > roi_min:
+        roi_8 = ((roi.astype(np.float32) - roi_min) / (roi_max - roi_min) * 255.0).astype(np.uint8)
+    else:
+        roi_8 = roi.astype(np.uint8)
+
+    bbox_local = (pad, pad, pad + (x2 - x1), pad + (y2 - y1))
+    char_mask = _get_character_mask(roi_8, bbox_local=bbox_local, dilation_px=3)
+    crop_mask = char_mask[0:roi_h, 0:roi_w]
+
+    if not np.any(crop_mask > 0):
+        # Fallback: no strokes detected — use median fill from dark context
+        cleaned[y1:y2, x1:x2] = bg_val
+        return cleaned
+
+    # ── Inpaint with Navier-Stokes (natural texture from dark neighbors) ──
+    if roi.dtype != np.uint8:
+        roi_inpainted = _inpaint_16bit(roi, crop_mask, radius=9, method=cv2.INPAINT_NS)
+    else:
+        roi_inpainted = cv2.inpaint(roi, crop_mask, 9, cv2.INPAINT_NS)
+
+    # ── Restore original margin pixels ────────────────────────────────────
+    # The margins were pre-conditioned (darkened) only to guide inpainting.
+    # Now restore them so anatomy edges remain untouched.
+    # Top margin
+    roi_inpainted[0:iy1, :] = roi_original[0:iy1, :]
+    # Bottom margin
+    roi_inpainted[iy2:, :] = roi_original[iy2:, :]
+    # Left margin
+    roi_inpainted[iy1:iy2, 0:ix1] = roi_original[iy1:iy2, 0:ix1]
+    # Right margin
+    roi_inpainted[iy1:iy2, ix2:] = roi_original[iy1:iy2, ix2:]
+
+    cleaned[ry1:ry2, rx1:rx2] = roi_inpainted
     return cleaned
 
 
