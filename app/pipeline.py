@@ -10,7 +10,7 @@ import datetime
 import numpy as np
 import pydicom
 
-from config import log, ENABLE_TAG_DEIDENTIFICATION
+from config import log, ENABLE_TAG_DEIDENTIFICATION, BBOX_IMAGE_NAME
 from text_region_detect import detect_text_regions
 from ocr_detect import detect_text_in_regions
 from classify import merge_detections, classify_phi, expand_phi_blocks, _iou
@@ -19,6 +19,7 @@ from masking import redact_pixels
 from verify import verify_redaction
 from dicom_io import write_pixels_to_dicom
 from de_identification.deidentify import deidentify_dataset
+from bbox_visualize import save_bbox_image
 
 
 def anonymize_dicom_file(input_path, before_output_path, output_path,
@@ -143,6 +144,11 @@ def anonymize_dicom_file(input_path, before_output_path, output_path,
         audit["redacted_regions"] = [
             {"text": r["text"], "bbox": r["bbox"]} for r in phi_regions
         ]
+
+        # ── Bbox visualization: save the frame with PHI regions boxed ─────────
+        bbox_output_path = os.path.join(os.path.dirname(before_output_path), BBOX_IMAGE_NAME)
+        save_bbox_image(ocr_frame, phi_regions, bbox_output_path)
+        audit["bbox_image_path"] = bbox_output_path
 
         # ── Stage 5: Redact ───────────────────────────────────────────────────
         log.info("  [Stage 5] Redacting PHI pixels (Navier-Stokes inpainting)...")

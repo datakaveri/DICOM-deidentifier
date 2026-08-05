@@ -39,10 +39,11 @@ FINAL_OUTPUT_NAME = "after_deidentification.dcm"
 DATA_SNAPSHOT_NAME = "data.json"
 PHI_TAGS_SNAPSHOT_NAME = "phi_tags.json"
 PIPELINE_AUDIT_SNAPSHOT_NAME = "pipeline_audit.json"
+BBOX_IMAGE_NAME = "bbox_regions.png"
 
 # Set to True to enable DICOM header tag de-identification (hashing/masking/FPE).
 # Set to False to keep all DICOM header tags 100% original and untouched (focusing solely on burned-in pixel text redaction).
-ENABLE_TAG_DEIDENTIFICATION = False
+ENABLE_TAG_DEIDENTIFICATION = True
 
 # Single consolidated file holding every hash/tokenise/encrypt key used by
 # de_identification/deidentify.py. One KeyStore is loaded from this file,

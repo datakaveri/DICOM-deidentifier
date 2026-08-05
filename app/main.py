@@ -82,6 +82,8 @@ def process_file(input_path, paddle_ocr, easy_ocr, analyzer, keystore):
     print(f"Redacted regions: {len(pipeline_audit['redacted_regions'])}")
     print(f"Tags de-identified: {len(pipeline_audit['deidentified_tags'])}")
     print(f"Final anonymized DICOM saved -> {final_output}")
+    if pipeline_audit.get("bbox_image_path"):
+        print(f"Bounding-box visualization saved -> {pipeline_audit['bbox_image_path']}")
     print(f"Full pipeline audit saved -> {pipeline_audit_snapshot}")
 
     return pipeline_audit
