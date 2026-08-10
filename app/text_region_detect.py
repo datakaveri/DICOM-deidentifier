@@ -21,9 +21,9 @@ _MIN_BLOBS_PER_LINE = 2
 
 _PAD_X, _PAD_Y = 8, 3
 
-_MIN_PEAK = 120
-_MIN_LINE_PEAK = 120
-_BRIGHT_THRESHOLD = 130
+_MIN_PEAK = 80
+_MIN_LINE_PEAK = 80
+_BRIGHT_THRESHOLD = 90
 
 # Local-contrast gate (replaces a flat "background must be dark" cutoff, which
 # rejected any line sitting over bright anatomy instead of just the margin).
@@ -32,7 +32,7 @@ _BRIGHT_THRESHOLD = 130
 # least _MIN_CONTRAST -- so text over bright tissue still passes as long as
 # it stands out from the tissue immediately around it.
 _LOCAL_BG_MARGIN = 40
-_MIN_CONTRAST = 50
+_MIN_CONTRAST = 25
 
 # Local adaptive-threshold pass (paired with the global Otsu pass in
 # _binarize): Otsu alone assumes text is the minority class against a
@@ -176,14 +176,15 @@ def detect_text_regions(image_8bit):
         if (line_peak - bg_mean) < _MIN_CONTRAST:
             continue
 
-        bright_cols = np.where(row_band.max(axis=0) > _BRIGHT_THRESHOLD)[0]
+        line_band = gray_orig[y1:y2, bg_x1:bg_x2]
+        bright_cols = np.where(line_band.max(axis=0) > _BRIGHT_THRESHOLD)[0]
 
         if len(bright_cols) >= 2:
-            x1 = max(0, int(bright_cols[0]) - _PAD_X)
-            x2 = min(crop_w, int(bright_cols[-1]) + _PAD_X)
+            x1 = max(0, bg_x1 + int(bright_cols[0]) - _PAD_X)
+            x2 = min(crop_w, bg_x1 + int(bright_cols[-1]) + _PAD_X)
         else:
-            x1 = max(0, min(b[0] for b in line) - _PAD_X)
-            x2 = min(crop_w, max(b[2] for b in line) + _PAD_X)
+            x1 = max(0, line_x1 - _PAD_X)
+            x2 = min(crop_w, line_x2 + _PAD_X)
 
         results.append([int(x1), int(y1), int(x2), int(y2)])
 

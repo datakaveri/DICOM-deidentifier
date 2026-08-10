@@ -24,7 +24,7 @@ from bbox_visualize import save_bbox_image
 
 def anonymize_dicom_file(input_path, before_output_path, output_path,
                           data_snapshot_path, paddle_ocr, easy_ocr, analyzer,
-                          keystore):
+                          keystore, deid_model=None, medical_ner=None, gliner_model=None):
     """
     Full 7-stage anonymization pipeline for a single DICOM file: burned-in
     pixel/OCR redaction (checkpointed to before_output_path, tags still
@@ -96,10 +96,12 @@ def anonymize_dicom_file(input_path, before_output_path, output_path,
             pixels = original_max - pixels
             log.info("  MONOCHROME1 detected — pixel values flipped.")
 
-        # Normalize to 8-bit for OCR pipeline
-        pix_min, pix_max = pixels.min(), pixels.max()
-        if pix_max > pix_min:
-            norm_8 = ((pixels - pix_min) / (pix_max - pix_min) * 255.0).astype(np.uint8)
+        # Robust contrast stretching (1st to 99th percentile) for 8-bit OCR pipeline
+        # Prevents extreme outlier pixels (metal implants, air padding) from crushing text contrast
+        p_min, p_max = np.percentile(pixels, (1.0, 99.0))
+        if p_max > p_min:
+            clipped = np.clip(pixels, p_min, p_max)
+            norm_8 = ((clipped - p_min) / (p_max - p_min) * 255.0).astype(np.uint8)
         else:
             norm_8 = pixels.astype(np.uint8)
 
@@ -124,7 +126,7 @@ def anonymize_dicom_file(input_path, before_output_path, output_path,
         # ── Stage 4: Classify ─────────────────────────────────────────────────
         log.info("  [Stage 4] Classifying detections (PHI vs clinical)...")
         merged     = merge_detections(raw_det)
-        phi_regions = classify_phi(merged, ocr_frame.shape, analyzer)
+        phi_regions = classify_phi(merged, ocr_frame.shape, analyzer, gliner_model, medical_ner, deid_model)
         phi_regions = expand_phi_blocks(merged, phi_regions, ocr_frame.shape)
         log.info(f"            PHI regions to redact: {len(phi_regions)}")
 

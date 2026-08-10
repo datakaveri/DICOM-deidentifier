@@ -157,12 +157,15 @@ def match_against_stored_tags(merged, stored_values, image_shape):
 
     for det in merged:
         text = det["text"].strip()
-        if not text:
+        if not text or len(text) < 4:
             continue
+        if _is_clinical(text):
+            continue
+
         norm_text = text.upper()
 
         hit = any(
-            norm_text == sv or norm_text in sv or sv in norm_text
+            norm_text == sv or (len(sv) >= 4 and norm_text in sv) or (len(norm_text) >= 4 and sv in norm_text)
             for sv in normalized_stored
         )
         if not hit:
