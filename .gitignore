@@ -46,3 +46,10 @@ pixel_anonymizer.py
 test_real_dicoms.py
 test_synthetic_burnin.py
 dicom_anonymizer_kaggle.ipynb
+
+# App-specific runtime/data assets
+app/data/*
+!app/data/.gitkeep
+app/data.zip
+app/secured.json
+
