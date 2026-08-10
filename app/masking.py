@@ -180,42 +180,30 @@ def _redact_border_zone(cleaned, x1, y1, x2, y2):
     roi_original = roi.copy()
 
     # Inner bbox coordinates within the ROI
-    iy1 = max(0, pad)
-    iy2 = min(roi_h, pad + (y2 - y1))
-    ix1 = max(0, pad)
-    ix2 = min(roi_w, pad + (x2 - x1))
+    iy1 = y1 - ry1
+    iy2 = y2 - ry1
+    ix1 = x1 - rx1
+    ix2 = x2 - rx1
 
-    # ── Sample the dark background level ──────────────────────────────────
-    # Look at the ENTIRE top-left quadrant of the image (guaranteed dark border)
-    # to get a reliable dark background reference, not the local context which
-    # may be contaminated by anatomy.
-    border_sample_h = max(1, h // 6)
-    border_sample_w = max(1, w // 6)
-    top_left = cleaned[0:border_sample_h, 0:border_sample_w]
-    if top_left.size > 0:
-        bg_val = int(np.median(top_left))
+    # ── Sample the local background level from immediate ROI margins ─────
+    # Sample from the outer border ring of the ROI margin strips, not distant top-left
+    margin_samples = []
+    if iy1 > 0:
+        margin_samples.append(roi[0:iy1, :])
+    if iy2 < roi_h:
+        margin_samples.append(roi[iy2:, :])
+    if ix1 > 0:
+        margin_samples.append(roi[iy1:iy2, 0:ix1])
+    if ix2 < roi_w:
+        margin_samples.append(roi[iy1:iy2, ix2:])
+
+    if margin_samples:
+        concat_margins = np.concatenate([m.ravel() for m in margin_samples])
+        bg_val = int(np.median(concat_margins))
     else:
-        bg_val = int(np.percentile(cleaned, 10))
+        bg_val = int(np.median(roi))
 
-    bg_ceiling = bg_val + max(8, int(abs(bg_val) * 0.25))
-
-    # ── PRE-CONDITION: darken bright anatomy in the ROI margins ───────────
-    # This prevents inpainting from sampling bright anatomy pixels as source.
-    # Only darken the MARGIN strip (outside the text bbox) — inside the bbox
-    # the text itself will be handled by the character mask.
-    #
-    # Top margin
-    margin = roi[0:iy1, :]
-    margin[margin > bg_ceiling] = bg_val
-    # Bottom margin
-    margin = roi[iy2:, :]
-    margin[margin > bg_ceiling] = bg_val
-    # Left margin
-    margin = roi[iy1:iy2, 0:ix1]
-    margin[margin > bg_ceiling] = bg_val
-    # Right margin
-    margin = roi[iy1:iy2, ix2:]
-    margin[margin > bg_ceiling] = bg_val
+    bg_ceiling = bg_val + max(12, int(abs(bg_val) * 0.30))
 
     # ── Build character stroke mask (same logic as anatomy zone) ──────────
     roi_min, roi_max = float(roi.min()), float(roi.max())
@@ -224,32 +212,34 @@ def _redact_border_zone(cleaned, x1, y1, x2, y2):
     else:
         roi_8 = roi.astype(np.uint8)
 
-    bbox_local = (pad, pad, pad + (x2 - x1), pad + (y2 - y1))
+    bbox_local = (ix1, iy1, ix2, iy2)
     char_mask = _get_character_mask(roi_8, bbox_local=bbox_local, dilation_px=3)
     crop_mask = char_mask[0:roi_h, 0:roi_w]
 
     if not np.any(crop_mask > 0):
-        # Fallback: no strokes detected — use median fill from dark context
-        cleaned[y1:y2, x1:x2] = bg_val
-        return cleaned
+        # Fallback: no strokes detected — create a box mask for Navier-Stokes local neighbor propagation
+        crop_mask = np.zeros((roi_h, roi_w), dtype=np.uint8)
+        crop_mask[iy1:iy2, ix1:ix2] = 255
 
-    # ── Inpaint with Navier-Stokes (natural texture from dark neighbors) ──
+    # ── Inpaint with Navier-Stokes (natural texture from local neighbors) ──
     if roi.dtype != np.uint8:
         roi_inpainted = _inpaint_16bit(roi, crop_mask, radius=9, method=cv2.INPAINT_NS)
     else:
         roi_inpainted = cv2.inpaint(roi, crop_mask, 9, cv2.INPAINT_NS)
 
     # ── Restore original margin pixels ────────────────────────────────────
-    # The margins were pre-conditioned (darkened) only to guide inpainting.
-    # Now restore them so anatomy edges remain untouched.
     # Top margin
-    roi_inpainted[0:iy1, :] = roi_original[0:iy1, :]
+    if iy1 > 0:
+        roi_inpainted[0:iy1, :] = roi_original[0:iy1, :]
     # Bottom margin
-    roi_inpainted[iy2:, :] = roi_original[iy2:, :]
+    if iy2 < roi_h:
+        roi_inpainted[iy2:, :] = roi_original[iy2:, :]
     # Left margin
-    roi_inpainted[iy1:iy2, 0:ix1] = roi_original[iy1:iy2, 0:ix1]
+    if ix1 > 0:
+        roi_inpainted[iy1:iy2, 0:ix1] = roi_original[iy1:iy2, 0:ix1]
     # Right margin
-    roi_inpainted[iy1:iy2, ix2:] = roi_original[iy1:iy2, ix2:]
+    if ix2 < roi_w:
+        roi_inpainted[iy1:iy2, ix2:] = roi_original[iy1:iy2, ix2:]
 
     cleaned[ry1:ry2, rx1:rx2] = roi_inpainted
     return cleaned
@@ -276,7 +266,12 @@ def _redact_anatomy_zone(cleaned, x1, y1, x2, y2):
     else:
         roi_8 = roi.astype(np.uint8)
 
-    bbox_local = (pad, pad, pad + (x2 - x1), pad + (y2 - y1))
+    iy1 = y1 - ry1
+    iy2 = y2 - ry1
+    ix1 = x1 - rx1
+    ix2 = x2 - rx1
+
+    bbox_local = (ix1, iy1, ix2, iy2)
     char_mask = _get_character_mask(roi_8, bbox_local=bbox_local, dilation_px=3)
     crop_mask = char_mask[0:roi_h, 0:roi_w]
 
