@@ -44,21 +44,21 @@ Results land under `output/<filename>/`: `data.json` (original tag snapshot), `p
 docker build -t skald-dicom .
 
 docker run --rm \
-  -v /path/to/input/dicoms:/data \
+  -v /path/to/input/dicoms:/app/data \
   -v /path/to/config:/app/config \
-  -v /path/to/output:/output \
+  -v /path/to/output:/app/output \
   skald-dicom
 ```
 
-The container processes every `.dcm` file found under `/data` (recursively) and writes results to `/output`, in the same layout described above. OCR/NLP model weights are baked into the image at build time, so the container needs no outbound network access at runtime — this matters for air-gapped/TEE deployments.
+The container processes every `.dcm` file found under `/app/data` (recursively) and writes results to `/app/output`, in the same layout described above. OCR/NLP model weights are baked into the image at build time, so the container needs no outbound network access at runtime — this matters for air-gapped/TEE deployments.
 
 Environment variables (already set in the image, override if needed):
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `SKALD_DATA_DIR` | `/data` | Input DICOM files (recursively scanned for `*.dcm`) |
+| `SKALD_DATA_DIR` | `/app/data` | Input DICOM files (recursively scanned for `*.dcm`) |
 | `SKALD_CONFIG_DIR` | `/app/config` | Reserved for future run-time config overrides |
-| `SKALD_OUTPUT_DIR` | `/output` | Per-file results, audit logs, and the persistent keystore |
+| `SKALD_OUTPUT_DIR` | `/app/output` | Per-file results, audit logs, and the persistent keystore |
 
 ## Testing
 

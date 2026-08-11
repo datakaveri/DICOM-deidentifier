@@ -8,12 +8,18 @@ __pycache__/
 *.pyc
 .pytest_cache/
 
-data/*
-!data/.gitkeep
 app/config/*
 !app/config/.gitkeep
-output/
 app/de_identification/keystore/
+
+# Sample/runtime data — these live under app/ but must never be baked into
+# the image (bloats it and can carry real patient DICOM files/output from
+# local runs). data/output are mounted volumes at container run time.
+app/data/*
+!app/data/.gitkeep
+app/data.zip
+app/output/
+app/secured.json
 
 raw_telanagana_dicom_dataset/
 
