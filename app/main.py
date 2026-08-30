@@ -35,12 +35,14 @@ from de_identification.keystore import KeyStore
 
 import time
 
-def process_file(input_path, paddle_ocr, easy_ocr, analyzer, keystore,
+def process_file(input_path, paddle_ocr, analyzer, keystore,
                  deid_model=None, medical_ner=None, gliner_model=None):
     """Runs the full pipeline for one DICOM file; returns its pipeline audit dict."""
+    import re
     start_time = time.time()
     stem = os.path.splitext(os.path.basename(input_path))[0]
-    out_dir = os.path.join(OUTPUT_DIR, stem)
+    safe_stem = re.sub(r'[^a-zA-Z0-9_\-]', '_', stem)[:64]
+    out_dir = os.path.join(OUTPUT_DIR, safe_stem)
     os.makedirs(out_dir, exist_ok=True)
 
     before_output = os.path.join(out_dir, BEFORE_OUTPUT_NAME)
@@ -71,7 +73,7 @@ def process_file(input_path, paddle_ocr, easy_ocr, analyzer, keystore,
     print(f"\nRunning de-identification pipeline (pixels, then tags) on {os.path.basename(input_path)}...")
     pipeline_audit = anonymize_dicom_file(
         input_path, before_output, final_output, data_snapshot,
-        paddle_ocr, easy_ocr, analyzer, keystore,
+        paddle_ocr, analyzer, keystore,
         deid_model=deid_model, medical_ner=medical_ner, gliner_model=gliner_model
     )
 
@@ -96,13 +98,15 @@ def process_file(input_path, paddle_ocr, easy_ocr, analyzer, keystore,
 def main():
     input_files = sorted(glob.glob(os.path.join(INPUT_DIR, "*.dcm")))
     if not input_files:
+        input_files = sorted(glob.glob(os.path.join(INPUT_DIR, "**", "*.dcm"), recursive=True))
+    if not input_files:
         print(f"No .dcm files found in {INPUT_DIR}/")
         return
 
-    print(f"Found {len(input_files)} file(s) in {INPUT_DIR}/ to process.")
+    print(f"Found {len(input_files)} file(s) to process.")
 
     use_gpu = check_gpu_available()
-    paddle_ocr, easy_ocr, analyzer, deid_model, medical_ner, gliner_model = initialize_engines(use_gpu=use_gpu)
+    paddle_ocr, analyzer, deid_model, medical_ner, gliner_model = initialize_engines(use_gpu=use_gpu)
 
     # One KeyStore shared across the whole batch, saved once at the end, so
     # every file's hash/tokenise/encrypt values stay consistent with each other.
@@ -110,16 +114,26 @@ def main():
 
     results = []
     for input_path in input_files:
-        audit = process_file(input_path, paddle_ocr, easy_ocr, analyzer, keystore,
+        audit = process_file(input_path, paddle_ocr, analyzer, keystore,
                              deid_model=deid_model, medical_ner=medical_ner, gliner_model=gliner_model)
         results.append(audit)
 
     keystore.save()
     print(f"\nShared key/token material for this batch saved -> {SECURED_KEYSTORE_FILE}")
 
-    print(f"\n{'='*60}\nBatch complete: {len(results)} file(s) processed.")
+    total_batch_time = sum(a.get("execution_time_seconds", 0) for a in results)
+    avg_time = total_batch_time / len(results) if results else 0
+
+    print(f"\n{'='*75}")
+    print(f"BATCH SUMMARY: {len(results)} file(s) processed in {total_batch_time:.2f}s (Avg: {avg_time:.2f}s/file)")
+    print(f"{'='*75}")
+    print(f"{'File Name':<42} {'Status':<16} {'Regions':<8} {'Time (s)':<8}")
+    print(f"{'-'*42} {'-'*16} {'-'*8} {'-'*8}")
     for audit in results:
-        print(f"  {audit['file']:<30} {audit['verification_status']}")
+        t_sec = audit.get("execution_time_seconds", 0)
+        num_regions = len(audit.get("redacted_regions", []))
+        print(f"{audit['file'][:40]:<42} {audit['verification_status']:<16} {num_regions:<8} {t_sec:>6.2f}s")
+    print(f"{'='*75}\n")
 
 
 if __name__ == "__main__":

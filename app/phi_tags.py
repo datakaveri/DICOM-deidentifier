@@ -172,14 +172,7 @@ def match_against_stored_tags(merged, stored_values, image_shape):
             continue
 
         bbox = det["bbox"]
-        y_mid = (bbox[1] + bbox[3]) / 2.0
-        x_mid = (bbox[0] + bbox[2]) / 2.0
-        in_border = (
-            y_mid < h * 0.18 or y_mid > h * 0.82 or
-            x_mid < w * 0.10 or x_mid > w * 0.90
-        )
-        zone = "border" if in_border else "anatomy"
-        log.info(f"    REDACT-TAG-MATCH ({zone}): '{text}' matches stored original tag value")
-        matches.append({"text": text, "bbox": bbox, "zone": zone})
+        log.info(f"    REDACT-TAG-MATCH: '{text}' matches stored original tag value")
+        matches.append({"text": text, "bbox": bbox})
 
     return matches

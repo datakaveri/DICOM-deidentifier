@@ -1,10 +1,13 @@
 """
-masking.py — Stage 5: character-level stroke isolation & Navier-Stokes pixel redaction.
+masking.py — Stage 5: Character-level stroke isolation & Navier-Stokes pixel redaction.
 
 Features:
   - VOI LUT & Inverse VOI LUT mapping for exact 16-bit / 8-bit visual reconstruction
-  - Tri-Signal Character Stroke Segmentation (Top-Hat + Contrast Thresholding + Ellipse Dilation)
-  - Two-Pass Iterative Neighbor Inpainting (structure-preserving, no quality loss to underlying anatomy)
+  - Adaptive Character Stroke Segmentation with quality gate (auto-reduces aggressiveness
+    when too much background texture is captured)
+  - Gaussian-feathered edge blending to eliminate hard rectangular boundaries
+  - Unified Character Stroke Inpainting across all image regions (border and anatomy alike)
+  - Native 8-bit and 16-bit support with Navier-Stokes structure-preserving propagation
 """
 
 import numpy as np
@@ -79,12 +82,18 @@ def _apply_inverse_voi_lut(visual_pixels, ds, original_raw_pixels):
 
 def _get_character_mask(roi_8bit, bbox_local=None, dilation_px=3):
     """
-    Tri-Signal Character Stroke Segmentation.
-    Combines:
-      1. Top-Hat High-Pass (bright text on dark background)
-      2. Local Relative Contrast Thresholding
-      3. Anti-Aliased Ellipse Dilation
-    Captures character strokes of ANY polarity in a unified mask.
+    Adaptive Character Stroke Segmentation with Quality Gate.
+
+    Uses a tiered approach:
+      Level 1 (Conservative): Top-Hat + Contrast only — works for clear text on
+              uniform backgrounds (dark borders, light backgrounds)
+      Level 2 (Aggressive): Adds Black-Hat + Adaptive threshold — used only when
+              Level 1 doesn't find enough strokes, and only if the result doesn't
+              capture too much background texture
+
+    Quality Gate: If the mask covers >45% of the bbox area, the detection is
+    capturing background texture (bone, muscle fibers, etc.) instead of just
+    character strokes. In that case, fall back to the conservative mask.
     """
     h, w = roi_8bit.shape[:2]
 
@@ -106,24 +115,83 @@ def _get_character_mask(roi_8bit, bbox_local=None, dilation_px=3):
     except Exception:
         denoised = crop.copy()
 
+    bbox_area = max(1, crop_h * crop_w)
+
+    # ── Level 1: Conservative (Top-Hat + Contrast) ──────────────────────────
     k_size = max(5, min(15, (crop_h // 2) | 1))
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k_size, k_size))
+
+    # Top-Hat: bright text on dark background
     tophat = cv2.morphologyEx(denoised, cv2.MORPH_TOPHAT, kernel)
     _, mask_bright = cv2.threshold(tophat, 8, 255, cv2.THRESH_BINARY)
 
+    # Relative contrast threshold (bright text only — conservative)
     bg_med = float(np.median(crop))
     crop_max = float(np.max(crop))
+    mask_contrast = np.zeros_like(crop)
     if crop_max > bg_med + 10.0:
-        t_contrast = bg_med + 0.20 * (crop_max - bg_med)
+        t_contrast = bg_med + 0.22 * (crop_max - bg_med)
         _, mask_contrast = cv2.threshold(crop, min(245.0, t_contrast), 255, cv2.THRESH_BINARY)
+
+    conservative_mask = cv2.bitwise_or(mask_bright, mask_contrast)
+    conservative_ratio = np.sum(conservative_mask > 0) / float(bbox_area)
+
+    # If conservative mask captures a reasonable amount of strokes (5-45%), use it
+    if 0.02 < conservative_ratio <= 0.45:
+        stroke_mask = conservative_mask
+    elif conservative_ratio > 0.45:
+        # Too much captured even at conservative level — use only Top-Hat
+        # (the contrast threshold is too sensitive for this ROI)
+        tophat_ratio = np.sum(mask_bright > 0) / float(bbox_area)
+        if tophat_ratio <= 0.45:
+            stroke_mask = mask_bright
+        else:
+            # Even Top-Hat alone is too aggressive (highly textured anatomy)
+            # Use a higher threshold to only catch the strongest strokes
+            _, stroke_mask = cv2.threshold(tophat, 15, 255, cv2.THRESH_BINARY)
     else:
-        mask_contrast = np.zeros_like(crop)
+        # ── Level 2: Aggressive (add Black-Hat + Adaptive) ──────────────────
+        # Conservative didn't find enough — try adding more signals
 
-    stroke_union = cv2.bitwise_or(mask_bright, mask_contrast)
+        # Black-Hat: dark text on light background
+        blackhat = cv2.morphologyEx(denoised, cv2.MORPH_BLACKHAT, kernel)
+        _, mask_dark = cv2.threshold(blackhat, 8, 255, cv2.THRESH_BINARY)
 
-    k_dil_size = max(5, min(9, dilation_px * 2 + 1))
+        # Adaptive threshold
+        block_size = max(11, min(31, (crop_h // 3) | 1))
+        mask_adaptive = cv2.adaptiveThreshold(
+            denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY, block_size, -10
+        )
+
+        # Dark contrast (inverted)
+        crop_min = float(np.min(crop))
+        if bg_med > crop_min + 10.0:
+            t_dark = bg_med - 0.22 * (bg_med - crop_min)
+            _, mc_dark = cv2.threshold(crop, max(10.0, t_dark), 255, cv2.THRESH_BINARY_INV)
+            mask_contrast = cv2.bitwise_or(mask_contrast, mc_dark)
+
+        aggressive_mask = cv2.bitwise_or(conservative_mask, mask_dark)
+        aggressive_mask = cv2.bitwise_or(aggressive_mask, mask_adaptive)
+        aggressive_mask = cv2.bitwise_or(aggressive_mask, mask_contrast)
+
+        aggressive_ratio = np.sum(aggressive_mask > 0) / float(bbox_area)
+
+        # Quality gate on aggressive mask
+        if aggressive_ratio <= 0.45:
+            stroke_mask = aggressive_mask
+        else:
+            # Aggressive captured too much texture — fall back to conservative
+            stroke_mask = conservative_mask if conservative_ratio > 0.01 else mask_bright
+
+    # Morphological close to fill tiny gaps in character strokes
+    k_close = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    stroke_closed = cv2.morphologyEx(stroke_mask, cv2.MORPH_CLOSE, k_close)
+
+    # Final dilation to cover anti-aliased stroke edges
+    k_dil_size = max(3, min(7, dilation_px * 2 + 1))
     k_dil = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_dil_size, k_dil_size))
-    dilated = cv2.dilate(stroke_union, k_dil, iterations=1)
+    dilated = cv2.dilate(stroke_closed, k_dil, iterations=1)
 
     full_mask = np.zeros((h, w), dtype=np.uint8)
     full_mask[by1:by2, bx1:bx2] = dilated
@@ -148,26 +216,41 @@ def _inpaint_16bit(image_16, mask_8, radius=9, method=cv2.INPAINT_NS):
     return result
 
 
-def _redact_border_zone(cleaned, x1, y1, x2, y2):
+def _feather_blend(original_roi, inpainted_roi, mask, feather_px=4):
     """
-    Border zone strategy: pre-conditioned inpainting.
+    Gaussian-feathered edge blending between original and inpainted ROI.
+    Creates a smooth, invisible transition instead of a hard rectangular boundary.
+    """
+    if feather_px < 1:
+        # No feathering — just direct replacement
+        result = original_roi.copy()
+        result[mask > 0] = inpainted_roi[mask > 0]
+        return result
 
-    Problem: border text bboxes often sit adjacent to bright anatomy.
-    Standard inpainting propagates that brightness into the dark border.
-    Post-clamping fixes the brightness but kills texture, creating a flat patch.
+    # Create a soft alpha mask by blurring the binary mask edges
+    blur_size = feather_px * 2 + 1
+    alpha = cv2.GaussianBlur(mask.astype(np.float32) / 255.0, (blur_size, blur_size), feather_px)
+    alpha = np.clip(alpha, 0.0, 1.0)
 
-    Solution: PRE-CONDITION the ROI margins before inpainting.
-      1. Save original ROI margin pixels
-      2. Temporarily replace bright margin pixels with the local dark
-         background value — this makes inpainting only sample from dark
-         pixels, preventing anatomy bleed
-      3. Build character stroke mask + inpaint (same as anatomy zone)
-      4. Restore original margin pixels — anatomy edges are untouched
+    # Blend: result = alpha * inpainted + (1 - alpha) * original
+    if original_roi.dtype != np.float32:
+        orig_f = original_roi.astype(np.float32)
+        inp_f = inpainted_roi.astype(np.float32)
+        blended = alpha * inp_f + (1.0 - alpha) * orig_f
+        return blended.astype(original_roi.dtype)
+    else:
+        return alpha * inpainted_roi + (1.0 - alpha) * original_roi
 
-    Result: natural inpainting texture (not flat) AND no bright artifacts.
+
+def redact_roi(cleaned, x1, y1, x2, y2, pad=10):
+    """
+    Unified character-level stroke inpainting for any ROI.
+    Extracts character strokes and inpaints with Navier-Stokes neighbor reconstruction.
+
+    Uses adaptive stroke detection with a quality gate to avoid over-masking
+    textured anatomy, and Gaussian-feathered blending to eliminate hard edges.
     """
     h, w = cleaned.shape[:2]
-    pad = 8
     rx1, rx2 = max(0, x1 - pad), min(w, x2 + pad)
     ry1, ry2 = max(0, y1 - pad), min(h, y2 + pad)
 
@@ -176,122 +259,62 @@ def _redact_border_zone(cleaned, x1, y1, x2, y2):
     if roi_h < 3 or roi_w < 3:
         return cleaned
 
-    # Save original margins for restoration after inpainting
-    roi_original = roi.copy()
-
-    # Inner bbox coordinates within the ROI
-    iy1 = y1 - ry1
-    iy2 = y2 - ry1
-    ix1 = x1 - rx1
-    ix2 = x2 - rx1
-
-    # ── Sample the local background level from immediate ROI margins ─────
-    # Sample from the outer border ring of the ROI margin strips, not distant top-left
-    margin_samples = []
-    if iy1 > 0:
-        margin_samples.append(roi[0:iy1, :])
-    if iy2 < roi_h:
-        margin_samples.append(roi[iy2:, :])
-    if ix1 > 0:
-        margin_samples.append(roi[iy1:iy2, 0:ix1])
-    if ix2 < roi_w:
-        margin_samples.append(roi[iy1:iy2, ix2:])
-
-    if margin_samples:
-        concat_margins = np.concatenate([m.ravel() for m in margin_samples])
-        bg_val = int(np.median(concat_margins))
-    else:
-        bg_val = int(np.median(roi))
-
-    bg_ceiling = bg_val + max(12, int(abs(bg_val) * 0.30))
-
-    # ── Build character stroke mask (same logic as anatomy zone) ──────────
     roi_min, roi_max = float(roi.min()), float(roi.max())
     if roi_max > roi_min:
         roi_8 = ((roi.astype(np.float32) - roi_min) / (roi_max - roi_min) * 255.0).astype(np.uint8)
     else:
         roi_8 = roi.astype(np.uint8)
 
+    iy1 = y1 - ry1
+    iy2 = y2 - ry1
+    ix1 = x1 - rx1
+    ix2 = x2 - rx1
+
     bbox_local = (ix1, iy1, ix2, iy2)
     char_mask = _get_character_mask(roi_8, bbox_local=bbox_local, dilation_px=3)
     crop_mask = char_mask[0:roi_h, 0:roi_w]
 
+    bbox_area = max(1, (iy2 - iy1) * (ix2 - ix1))
+    mask_ratio = np.sum(crop_mask > 0) / float(bbox_area)
+
     if not np.any(crop_mask > 0):
-        # Fallback: no strokes detected — create a box mask for Navier-Stokes local neighbor propagation
+        # Fallback: no strokes found at all — use a gentle Telea inpainting
+        # on the bbox area (Telea handles large rectangles better than NS)
         crop_mask = np.zeros((roi_h, roi_w), dtype=np.uint8)
         crop_mask[iy1:iy2, ix1:ix2] = 255
-
-    # ── Inpaint with Navier-Stokes (natural texture from local neighbors) ──
-    if roi.dtype != np.uint8:
-        roi_inpainted = _inpaint_16bit(roi, crop_mask, radius=9, method=cv2.INPAINT_NS)
+        inpaint_method = cv2.INPAINT_TELEA
+        inpaint_radius = 8
+    elif mask_ratio > 0.50:
+        # Quality gate triggered — too much was captured, likely background texture
+        # Use Telea (which handles large masked areas more gracefully)
+        inpaint_method = cv2.INPAINT_TELEA
+        inpaint_radius = 8
     else:
-        roi_inpainted = cv2.inpaint(roi, crop_mask, 9, cv2.INPAINT_NS)
+        # Normal case: clean stroke mask — use Navier-Stokes for best quality
+        inpaint_method = cv2.INPAINT_NS
+        inpaint_radius = 10
 
-    # ── Restore original margin pixels ────────────────────────────────────
-    # Top margin
-    if iy1 > 0:
-        roi_inpainted[0:iy1, :] = roi_original[0:iy1, :]
-    # Bottom margin
-    if iy2 < roi_h:
-        roi_inpainted[iy2:, :] = roi_original[iy2:, :]
-    # Left margin
-    if ix1 > 0:
-        roi_inpainted[iy1:iy2, 0:ix1] = roi_original[iy1:iy2, 0:ix1]
-    # Right margin
-    if ix2 < roi_w:
-        roi_inpainted[iy1:iy2, ix2:] = roi_original[iy1:iy2, ix2:]
+    if roi.dtype != np.uint8:
+        roi_inpainted = _inpaint_16bit(roi, crop_mask, radius=inpaint_radius, method=inpaint_method)
+    else:
+        roi_inpainted = cv2.inpaint(roi, crop_mask, inpaint_radius, inpaint_method)
 
-    cleaned[ry1:ry2, rx1:rx2] = roi_inpainted
+    # Gaussian-feathered blend to eliminate hard rectangular edges
+    blended = _feather_blend(roi, roi_inpainted, crop_mask, feather_px=3)
+
+    cleaned[ry1:ry2, rx1:rx2] = blended
     return cleaned
 
 
-def _redact_anatomy_zone(cleaned, x1, y1, x2, y2):
-    """
-    Anatomy zone strategy: Character-level stroke mask + Navier-Stokes inpainting.
-    Reconstructs pixels from immediate real neighbors.
-    """
-    h, w = cleaned.shape[:2]
-    pad = 6
-    rx1, rx2 = max(0, x1 - pad), min(w, x2 + pad)
-    ry1, ry2 = max(0, y1 - pad), min(h, y2 + pad)
-
-    roi = cleaned[ry1:ry2, rx1:rx2]
-    roi_h, roi_w = roi.shape[:2]
-    if roi_h < 3 or roi_w < 3:
-        return cleaned
-
-    roi_min, roi_max = float(roi.min()), float(roi.max())
-    if roi_max > roi_min:
-        roi_8 = ((roi.astype(np.float32) - roi_min) / (roi_max - roi_min) * 255.0).astype(np.uint8)
-    else:
-        roi_8 = roi.astype(np.uint8)
-
-    iy1 = y1 - ry1
-    iy2 = y2 - ry1
-    ix1 = x1 - rx1
-    ix2 = x2 - rx1
-
-    bbox_local = (ix1, iy1, ix2, iy2)
-    char_mask = _get_character_mask(roi_8, bbox_local=bbox_local, dilation_px=3)
-    crop_mask = char_mask[0:roi_h, 0:roi_w]
-
-    if not np.any(crop_mask > 0):
-        # Fallback if no distinct strokes: use local median fill in ROI
-        cleaned[y1:y2, x1:x2] = int(np.median(roi))
-        return cleaned
-
-    if roi.dtype != np.uint8:
-        roi_inpainted = _inpaint_16bit(roi, crop_mask, radius=9, method=cv2.INPAINT_NS)
-    else:
-        roi_inpainted = cv2.inpaint(roi, crop_mask, 9, cv2.INPAINT_NS)
-
-    cleaned[ry1:ry2, rx1:rx2] = roi_inpainted
-    return cleaned
+# Backward-compatible alias
+_redact_border_zone = redact_roi
+_redact_anatomy_zone = redact_roi
 
 
 def redact_pixels(image_array, phi_regions, ds=None):
     """
-    Character-stroke level pixel redaction with Navier-Stokes neighbor propagation.
+    Unified character-stroke level pixel redaction with Navier-Stokes neighbor propagation.
+    Works identically across all regions without arbitrary border/anatomy distinction.
 
     Works on native 8-bit OR 16-bit pixel arrays without losing dynamic range.
     Returns (cleaned_array, combined_mask).
@@ -304,8 +327,7 @@ def redact_pixels(image_array, phi_regions, ds=None):
     h, w = cleaned.shape[:2]
     combined_mask = np.zeros((h, w), dtype=np.uint8)
 
-    border_count = 0
-    anatomy_count = 0
+    redact_count = 0
 
     for region in phi_regions:
         x1, y1, x2, y2 = region["bbox"]
@@ -314,21 +336,13 @@ def redact_pixels(image_array, phi_regions, ds=None):
         if (x2 - x1) <= 0 or (y2 - y1) <= 0:
             continue
 
-        zone = region.get("zone", "border")
         combined_mask[y1:y2, x1:x2] = 255
-
-        if zone == "border":
-            cleaned = _redact_border_zone(cleaned, x1, y1, x2, y2)
-            border_count += 1
-            log.info(f"  [Stage 5] Border fill applied @ [{x1},{y1},{x2},{y2}]")
-        else:
-            cleaned = _redact_anatomy_zone(cleaned, x1, y1, x2, y2)
-            anatomy_count += 1
-            log.info(f"  [Stage 5] Character stroke inpainting @ [{x1},{y1},{x2},{y2}]")
+        cleaned = redact_roi(cleaned, x1, y1, x2, y2)
+        redact_count += 1
+        log.info(f"  [Stage 5] Character stroke inpainting @ [{x1},{y1},{x2},{y2}]")
 
     log.info(
-        f"  [Stage 5] Done. Border fills: {border_count} | "
-        f"Anatomy inpainting: {anatomy_count} | "
+        f"  [Stage 5] Done. Total regions redacted: {redact_count} | "
         f"Total pixels masked: {int(np.sum(combined_mask > 0))}"
     )
     return cleaned, combined_mask

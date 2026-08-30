@@ -1,10 +1,9 @@
 """
 text_region_detect.py — Stage 2: shape-based burned-in text region detection.
 
-Detects candidate text regions by connected-component/shape analysis only —
-no OCR, no text is read here. Stage 3 (ocr_detect.py) then runs OCR strictly
-inside the bounding boxes this stage finds, instead of across the whole
-image. Ported from bbox/detect_text_regions_standalone.py's TextRegionDetector.
+Detects candidate text regions by connected-component/shape analysis and
+horizontal phrase clustering — no heavy OCR is needed here. Stage 3 (ocr_detect.py)
+then runs PaddleOCR strictly inside these compact, localized bounding boxes.
 """
 
 import numpy as np
@@ -16,30 +15,13 @@ _MIN_CHAR_H, _MAX_CHAR_H = 4, 60
 _MIN_CHAR_W, _MAX_CHAR_W = 2, 120
 _MIN_CHAR_AREA = 8
 
-_LINE_Y_TOLERANCE = 8
-_MIN_BLOBS_PER_LINE = 2
+# Maximum horizontal gap between adjacent characters/words to be grouped in the same box
+_MAX_WORD_GAP_PX = 45
+_LINE_Y_TOLERANCE = 10
+_MIN_BLOBS_PER_REGION = 2
 
-_PAD_X, _PAD_Y = 8, 3
-
-_MIN_PEAK = 80
-_MIN_LINE_PEAK = 80
-_BRIGHT_THRESHOLD = 90
-
-# Local-contrast gate (replaces a flat "background must be dark" cutoff, which
-# rejected any line sitting over bright anatomy instead of just the margin).
-# Background is now sampled only in a margin around the text blobs themselves,
-# and the line is kept if it's brighter than THAT local surrounding by at
-# least _MIN_CONTRAST -- so text over bright tissue still passes as long as
-# it stands out from the tissue immediately around it.
-_LOCAL_BG_MARGIN = 40
-_MIN_CONTRAST = 25
-
-# Local adaptive-threshold pass (paired with the global Otsu pass in
-# _binarize): Otsu alone assumes text is the minority class against a
-# uniform background, which holds at the dark margin but not over anatomy,
-# where local contrast is what marks text, not absolute brightness.
-_ADAPTIVE_BLOCK = 31
-_ADAPTIVE_C = -15
+_PAD_X, _PAD_Y = 10, 6
+_MIN_PEAK = 70
 
 
 def _to_grayscale(image):
@@ -57,13 +39,8 @@ def _to_grayscale(image):
 
 def _binarize(image):
     """
-    Returns the two foreground masks (255 = candidate text pixel) separately
-    instead of OR-ing them into one mask. Merging pixels before connected-
-    component labeling lets a bridge of adaptive-threshold pixels (e.g. along
-    a background/anatomy boundary) fuse an otherwise-isolated line of
-    characters into one oversized blob, which then fails the char-size filter
-    and silently disappears. Keeping the masks separate and running
-    connected components on each independently avoids that.
+    Produces dual foreground masks (Otsu global + Adaptive local contrast)
+    to capture both high-contrast margin text and text overlaid on anatomy.
     """
     gray = _to_grayscale(image)
     gray2x = cv2.resize(gray, None, fx=_SCALE, fy=_SCALE, interpolation=cv2.INTER_CUBIC)
@@ -73,12 +50,9 @@ def _binarize(image):
         otsu = cv2.bitwise_not(otsu)
     fg_otsu = cv2.bitwise_not(otsu)
 
-    # Bright-relative-to-its-own-neighborhood pass: catches text sitting over
-    # anatomy, where Otsu's single whole-image threshold sees the text as part
-    # of the same bright class as the surrounding tissue.
     fg_adaptive = cv2.adaptiveThreshold(
         gray2x, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY,
-        _ADAPTIVE_BLOCK, _ADAPTIVE_C
+        31, -15
     )
 
     return fg_otsu, fg_adaptive
@@ -86,16 +60,16 @@ def _binarize(image):
 
 def detect_text_regions(image_8bit):
     """
-    Detects candidate burned-in text regions by shape (blob/line geometry),
-    not OCR. `image_8bit` is an 8-bit grayscale (or BGR/BGRA) image.
+    Detects candidate burned-in text regions by shape and horizontal phrase clustering.
+    Produces tight, localized bounding boxes for each text line/phrase without merging
+    across the entire width of the image.
 
-    Returns a list of [x1, y1, x2, y2] bounding boxes, in the same pixel
-    coordinates as `image_8bit`.
+    Returns a list of [x1, y1, x2, y2] bounding boxes in image pixel coordinates.
     """
-    crop_h, crop_w = image_8bit.shape[:2]
+    img_h, img_w = image_8bit.shape[:2]
 
-    gray_check = _to_grayscale(image_8bit)
-    if int(gray_check.max()) < _MIN_PEAK:
+    gray = _to_grayscale(image_8bit)
+    if int(gray.max()) < _MIN_PEAK:
         return []
 
     fg_otsu, fg_adaptive = _binarize(image_8bit)
@@ -107,24 +81,16 @@ def detect_text_regions(image_8bit):
         n, _, stats, _ = cv2.connectedComponentsWithStats(fg, connectivity=8)
 
         for i in range(1, n):
-            x = stats[i, cv2.CC_STAT_LEFT]
-            y = stats[i, cv2.CC_STAT_TOP]
-            bw = stats[i, cv2.CC_STAT_WIDTH]
-            bh = stats[i, cv2.CC_STAT_HEIGHT]
-            ba = stats[i, cv2.CC_STAT_AREA]
+            x = stats[i, cv2.CC_STAT_LEFT] // _SCALE
+            y = stats[i, cv2.CC_STAT_TOP] // _SCALE
+            bw = stats[i, cv2.CC_STAT_WIDTH] // _SCALE
+            bh = stats[i, cv2.CC_STAT_HEIGHT] // _SCALE
+            ba = stats[i, cv2.CC_STAT_AREA] // (_SCALE * _SCALE)
 
-            x1_c = x // _SCALE
-            y1_c = y // _SCALE
-            x2_c = (x + bw) // _SCALE
-            y2_c = (y + bh) // _SCALE
-            h_c = y2_c - y1_c
-            w_c = x2_c - x1_c
-            area_c = ba // (_SCALE * _SCALE)
-
-            if (_MIN_CHAR_H <= h_c <= _MAX_CHAR_H and
-                    _MIN_CHAR_W <= w_c <= _MAX_CHAR_W and
-                    area_c >= _MIN_CHAR_AREA):
-                box = (x1_c, y1_c, x2_c, y2_c)
+            if (_MIN_CHAR_H <= bh <= _MAX_CHAR_H and
+                    _MIN_CHAR_W <= bw <= _MAX_CHAR_W and
+                    ba >= _MIN_CHAR_AREA):
+                box = (int(x), int(y), int(x + bw), int(y + bh))
                 if box not in seen:
                     seen.add(box)
                     char_boxes.append(box)
@@ -132,60 +98,79 @@ def detect_text_regions(image_8bit):
     if not char_boxes:
         return []
 
-    char_boxes.sort(key=lambda b: ((b[1] + b[3]) / 2, b[0]))
+    # Sort characters top-to-bottom, left-to-right
+    char_boxes.sort(key=lambda b: (b[1], b[0]))
 
-    lines = []
-    current = [char_boxes[0]]
+    # ── Horizontal Phrase Clustering ──────────────────────────────────────────
+    # Group characters into distinct phrases based on Y-alignment AND horizontal proximity.
+    clusters = []
+    for box in char_boxes:
+        bx1, by1, bx2, by2 = box
+        matched = False
+        for cluster in clusters:
+            cy_box = (by1 + by2) / 2
+            cy_cluster = sum((b[1] + b[3]) / 2 for b in cluster) / len(cluster)
 
-    for box in char_boxes[1:]:
-        prev_cy = (current[-1][1] + current[-1][3]) / 2
-        curr_cy = (box[1] + box[3]) / 2
-        if abs(curr_cy - prev_cy) <= _LINE_Y_TOLERANCE:
-            current.append(box)
-        else:
-            lines.append(current)
-            current = [box]
-    lines.append(current)
+            # Check if vertically on same line
+            if abs(cy_box - cy_cluster) <= _LINE_Y_TOLERANCE:
+                # Check horizontal distance to nearest character in cluster
+                min_dx = min(
+                    abs(bx1 - b[2]) if bx1 >= b[2] else (abs(b[0] - bx2) if b[0] >= bx2 else 0)
+                    for b in cluster
+                )
+                if min_dx <= _MAX_WORD_GAP_PX:
+                    cluster.append(box)
+                    matched = True
+                    break
 
-    gray_orig = _to_grayscale(image_8bit)
+        if not matched:
+            clusters.append([box])
+
+    # Convert clusters into tight bounding boxes
     results = []
-
-    for line in lines:
-        if len(line) < _MIN_BLOBS_PER_LINE:
+    for cluster in clusters:
+        if len(cluster) < _MIN_BLOBS_PER_REGION:
             continue
 
-        y1 = max(0, min(b[1] for b in line) - _PAD_Y)
-        y2 = min(crop_h, max(b[3] for b in line) + _PAD_Y)
+        cx1 = max(0, min(b[0] for b in cluster) - _PAD_X)
+        cy1 = max(0, min(b[1] for b in cluster) - _PAD_Y)
+        cx2 = min(img_w, max(b[2] for b in cluster) + _PAD_X)
+        cy2 = min(img_h, max(b[3] for b in cluster) + _PAD_Y)
 
-        row_band = gray_orig[y1:y2, :]
+        box_w = cx2 - cx1
+        box_h = cy2 - cy1
 
-        line_peak = int(row_band.max()) if row_band.size > 0 else 0
-        if line_peak < _MIN_LINE_PEAK:
+        # Reject enormous whole-image noise boxes
+        if box_w > img_w * 0.95 and box_h > img_h * 0.5:
             continue
 
-        # Background sampled only in a margin around this line's blobs, not
-        # the whole row width, so bright anatomy elsewhere in the image can't
-        # sink a line that's genuinely brighter than what's immediately
-        # around it.
-        line_x1 = min(b[0] for b in line)
-        line_x2 = max(b[2] for b in line)
-        bg_x1 = max(0, line_x1 - _LOCAL_BG_MARGIN)
-        bg_x2 = min(crop_w, line_x2 + _LOCAL_BG_MARGIN)
-        local_band = gray_orig[y1:y2, bg_x1:bg_x2]
-        bg_mean = float(np.mean(local_band)) if local_band.size > 0 else 0.0
-        if (line_peak - bg_mean) < _MIN_CONTRAST:
-            continue
+        results.append([int(cx1), int(cy1), int(cx2), int(cy2)])
 
-        line_band = gray_orig[y1:y2, bg_x1:bg_x2]
-        bright_cols = np.where(line_band.max(axis=0) > _BRIGHT_THRESHOLD)[0]
+    # Merge overlapping/adjacent candidate boxes (iterative until stable)
+    def _merge_pass(boxes):
+        merged = []
+        for box in sorted(boxes, key=lambda b: (b[1], b[0])):
+            matched = False
+            bx1, by1, bx2, by2 = box
+            for m in merged:
+                mx1, my1, mx2, my2 = m
+                # If boxes overlap or are within 15px of each other
+                if not (bx2 < mx1 - 15 or bx1 > mx2 + 15 or by2 < my1 - 8 or by1 > my2 + 8):
+                    m[0] = min(mx1, bx1)
+                    m[1] = min(my1, by1)
+                    m[2] = max(mx2, bx2)
+                    m[3] = max(my2, by2)
+                    matched = True
+                    break
+            if not matched:
+                merged.append(box)
+        return merged
 
-        if len(bright_cols) >= 2:
-            x1 = max(0, bg_x1 + int(bright_cols[0]) - _PAD_X)
-            x2 = min(crop_w, bg_x1 + int(bright_cols[-1]) + _PAD_X)
-        else:
-            x1 = max(0, line_x1 - _PAD_X)
-            x2 = min(crop_w, line_x2 + _PAD_X)
+    merged_results = results
+    for _ in range(5):  # max 5 iterations to convergence
+        new_merged = _merge_pass(merged_results)
+        if len(new_merged) == len(merged_results):
+            break
+        merged_results = new_merged
 
-        results.append([int(x1), int(y1), int(x2), int(y2)])
-
-    return results
+    return merged_results

@@ -21,15 +21,15 @@ pix_min, pix_max = pixels.min(), pixels.max()
 norm_8 = ((pixels - pix_min) / (pix_max - pix_min) * 255.0).astype(np.uint8)
 
 use_gpu = check_gpu_available()
-paddle_ocr, easy_ocr, analyzer = initialize_engines(use_gpu=use_gpu)
-print(f"\npaddle_ocr={'OK' if paddle_ocr else 'None'}  easy_ocr={'OK' if easy_ocr else 'None'}  analyzer={'OK' if analyzer else 'None'}")
+easy_ocr, analyzer, deid_model, medical_ner, gliner_model = initialize_engines(use_gpu=use_gpu)
+print(f"\neasy_ocr={'OK' if easy_ocr else 'None'}  analyzer={'OK' if analyzer else 'None'}")
 
 regions = detect_text_regions(norm_8)
 print(f"\n[Stage 2] Candidate regions: {len(regions)}")
 for r in regions:
     print(" ", r)
 
-raw = detect_text_in_regions(norm_8, regions, paddle_ocr, easy_ocr)
+raw = detect_text_in_regions(norm_8, regions, easy_ocr=easy_ocr)
 print(f"\n[Stage 3] Raw OCR detections: {len(raw)}")
 for r in raw:
     print(" ", r)

@@ -1,7 +1,5 @@
 """
-ocr_detect.py — Stage 3: OCR text detection, restricted to the candidate
-regions found by Stage 2 (text_region_detect.py), across available engines
-(PaddleOCR / EasyOCR).
+ocr_detect.py — Stage 3: OCR text detection, powered exclusively by PaddleOCR.
 """
 
 import numpy as np
@@ -9,156 +7,148 @@ import cv2
 
 from config import log
 
-
-def _parse_paddle_result(result):
-    """
-    Parses PaddleOCR result into a flat list of {text, bbox, confidence} dicts.
-    Handles three formats:
-      1. New PaddleX predict() -> list of OCRResult objects (has .rec_texts etc.)
-      2. New PaddleX predict() -> list of dicts with rec_texts/rec_polys/rec_scores
-      3. Legacy PaddleOCR ocr() -> list of [[[x,y],...], (text, score)]
-    """
-    detections = []
-    if not result or len(result) == 0:
-        return detections
-
-    for item in result:
-        # ── Format 1 & 2: PaddleX OCRResult object or dict ─────────────────
-        rec_texts  = None
-        rec_polys  = None
-        rec_scores = None
-
-        if hasattr(item, 'rec_texts'):
-            # Object with attributes
-            rec_texts  = item.rec_texts
-            rec_polys  = item.rec_polys
-            rec_scores = item.rec_scores
-        elif isinstance(item, dict):
-            rec_texts  = item.get('rec_texts', [])
-            rec_polys  = item.get('rec_polys', [])
-            rec_scores = item.get('rec_scores', [])
-
-        if rec_texts is not None:
-            for text, pts, score in zip(rec_texts, rec_polys, rec_scores):
-                try:
-                    pts = np.array(pts, dtype=np.int32)
-                    xs = pts[:, 0]; ys = pts[:, 1]
-                    detections.append({
-                        "text": str(text).strip(),
-                        "bbox": [int(xs.min()), int(ys.min()),
-                                 int(xs.max()), int(ys.max())],
-                        "confidence": float(score),
-                        "engine": "paddle"
-                    })
-                except Exception as e:
-                    log.debug(f"PaddleX item parse error: {e}")
-            continue  # Handled this item; go to next
-
-        # ── Format 3: Legacy list of [points, (text, score)] ───────────────
-        if isinstance(item, list):
-            for line in item:
-                try:
-                    if (
-                        len(line) == 2
-                        and isinstance(line[1], (list, tuple))
-                        and len(line[1]) == 2
-                    ):
-                        pts = np.array(line[0], dtype=np.int32)
-                        text  = str(line[1][0]).strip()
-                        score = float(line[1][1])
-                        xs = pts[:, 0]; ys = pts[:, 1]
-                        detections.append({
-                            "text": text,
-                            "bbox": [int(xs.min()), int(ys.min()),
-                                     int(xs.max()), int(ys.max())],
-                            "confidence": score,
-                            "engine": "paddle"
-                        })
-                except Exception as e:
-                    log.debug(f"Legacy PaddleOCR line parse error: {e}")
-
-    return detections
-
-
 _MIN_CROP_HEIGHT = 48
 _MAX_UPSCALE = 4.0
 _PAD_FRAC = 0.6
 
 
-def detect_text_in_regions(image_8bit, bboxes, paddle_ocr=None, easy_ocr=None, padding=12):
+def _parse_paddle_output(res):
     """
-    Runs all available OCR engines only inside each candidate bbox from
-    Stage 2 (text_region_detect.detect_text_regions), instead of across the
-    whole image. Each bbox is padded (generously, scaled to the box's own
-    height, since Stage 2 boxes are tight single text lines and OCR engines
-    need surrounding context to recognize characters reliably) and, if still
-    small, upscaled so the recognizer has enough resolution to work with.
-    Results are translated back into full-image coordinates.
+    Normalizes outputs from native PaddleOCR and RapidOCR into standard (pts, text, conf) tuples.
+    """
+    parsed = []
+    if not res:
+        return parsed
+
+    # Check if native PaddleOCR format: [[ [box_pts, (text, conf)], ... ]]
+    if isinstance(res, list) and len(res) > 0 and isinstance(res[0], list):
+        # Native Paddle returns list of lines per image
+        lines = res[0] if (len(res) == 1 and isinstance(res[0], list) and len(res[0]) > 0 and isinstance(res[0][0], list)) else res
+        for line in lines:
+            if isinstance(line, (list, tuple)) and len(line) >= 2:
+                box_pts = line[0]
+                text_info = line[1]
+                if isinstance(text_info, (list, tuple)) and len(text_info) >= 2:
+                    text, conf = str(text_info[0]), float(text_info[1])
+                elif isinstance(text_info, str):
+                    text = text_info
+                    conf = float(line[2]) if len(line) > 2 else 0.9
+                else:
+                    continue
+                parsed.append((box_pts, text, conf))
+    elif isinstance(res, list):
+        # RapidOCR format: [ [box_pts, text, str_conf], ... ]
+        for line in res:
+            if isinstance(line, (list, tuple)) and len(line) >= 3:
+                box_pts = line[0]
+                text = str(line[1])
+                try:
+                    conf = float(line[2])
+                except Exception:
+                    conf = 0.9
+                parsed.append((box_pts, text, conf))
+
+    return parsed
+
+
+def detect_text_in_regions(image_8bit, bboxes, paddle_ocr=None, padding=12, run_on_regions=False):
+    """
+    Detects text from the image using the primary PaddleOCR engine.
+    If run_on_regions is False, runs PaddleOCR on the full image directly.
+    If run_on_regions is True, runs PaddleOCR strictly on the individual cropped candidate regions.
     """
     raw = []
-    h, w = image_8bit.shape[:2]
 
     if len(image_8bit.shape) == 2:
         rgb_full = cv2.cvtColor(image_8bit, cv2.COLOR_GRAY2RGB)
     else:
         rgb_full = image_8bit
 
-    for bbox in bboxes:
-        x1, y1, x2, y2 = bbox
-        pad = max(padding, int((y2 - y1) * _PAD_FRAC))
-        x1 = max(0, x1 - pad); y1 = max(0, y1 - pad)
-        x2 = min(w, x2 + pad); y2 = min(h, y2 + pad)
-        if x2 <= x1 or y2 <= y1:
-            continue
+    # ── 1. Primary: PaddleOCR (Full Image) ──────────────────────────────────
+    if paddle_ocr and not run_on_regions:
+        try:
+            img_h, img_w = image_8bit.shape[:2]
+            if hasattr(paddle_ocr, 'ocr'):
+                # Native PaddleOCR
+                res = paddle_ocr.ocr(rgb_full, cls=False)
+            elif callable(paddle_ocr):
+                # RapidOCR / callable
+                res, _ = paddle_ocr(rgb_full)
+            else:
+                res = None
 
-        crop = rgb_full[y1:y2, x1:x2]
+            parsed = _parse_paddle_output(res)
+            _BBOX_PAD = 5  # px padding to prevent half-cut text
+            for (box_pts, text, conf) in parsed:
+                pts = np.array(box_pts, dtype=np.int32)
+                xs = pts[:, 0]
+                ys = pts[:, 1]
+                bbox = [
+                    max(0, int(xs.min()) - _BBOX_PAD),
+                    max(0, int(ys.min()) - _BBOX_PAD),
+                    min(img_w, int(xs.max()) + _BBOX_PAD),
+                    min(img_h, int(ys.max()) + _BBOX_PAD),
+                ]
+                raw.append({
+                    "text": str(text).strip(),
+                    "bbox": bbox,
+                    "confidence": float(conf),
+                    "variant": "full",
+                    "engine": "paddleocr"
+                })
+            return raw
+        except Exception as e:
+            log.error(f"PaddleOCR full-image mode failed: {e}")
 
-        scale = 1.0
-        crop_h = y2 - y1
-        if crop_h < _MIN_CROP_HEIGHT:
-            scale = min(_MAX_UPSCALE, _MIN_CROP_HEIGHT / crop_h)
-            crop = cv2.resize(crop, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+    # ── 2. Targeted: PaddleOCR (Region-based / Crops) ───────────────────────
+    if paddle_ocr and run_on_regions and bboxes:
+        h, w = image_8bit.shape[:2]
+        for bbox in bboxes:
+            x1, y1, x2, y2 = bbox
+            pad = padding
+            x1 = max(0, x1 - pad)
+            y1 = max(0, y1 - pad)
+            x2 = min(w, x2 + pad)
+            y2 = min(h, y2 + pad)
+            if x2 <= x1 or y2 <= y1:
+                continue
 
-        def _to_full(local_bbox):
-            return [
-                x1 + local_bbox[0] / scale, y1 + local_bbox[1] / scale,
-                x1 + local_bbox[2] / scale, y1 + local_bbox[3] / scale,
-            ]
+            crop = rgb_full[y1:y2, x1:x2]
 
-        # PaddleOCR — use new predict() API (ocr() is deprecated in PaddleX)
-        if paddle_ocr:
+            scale = 1.0
+            crop_h = y2 - y1
+            if crop_h < _MIN_CROP_HEIGHT:
+                scale = min(_MAX_UPSCALE, _MIN_CROP_HEIGHT / crop_h)
+                crop = cv2.resize(crop, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+
+            def _to_full(local_bbox):
+                return [
+                    x1 + local_bbox[0] / scale, y1 + local_bbox[1] / scale,
+                    x1 + local_bbox[2] / scale, y1 + local_bbox[3] / scale,
+                ]
+
             try:
-                # Try new predict() first (PaddleX >= 3.x)
-                if hasattr(paddle_ocr, 'predict'):
-                    result = paddle_ocr.predict(crop)
+                if hasattr(paddle_ocr, 'ocr'):
+                    res = paddle_ocr.ocr(crop, cls=False)
+                elif callable(paddle_ocr):
+                    res, _ = paddle_ocr(crop)
                 else:
-                    import warnings
-                    with warnings.catch_warnings():
-                        warnings.simplefilter("ignore", DeprecationWarning)
-                        result = paddle_ocr.ocr(crop, cls=False)
-                for det in _parse_paddle_result(result):
-                    det["bbox"] = [int(v) for v in _to_full(det["bbox"])]
-                    det["variant"] = "region"
-                    raw.append(det)
-            except Exception as e:
-                log.debug(f"PaddleOCR failed on region {bbox}: {e}")
+                    res = None
 
-        # EasyOCR
-        if easy_ocr:
-            try:
-                results = easy_ocr.readtext(crop)
-                for (bbox_pts, text, conf) in results:
-                    pts = np.array(bbox_pts, dtype=np.int32)
-                    xs = pts[:, 0]; ys = pts[:, 1]
+                parsed = _parse_paddle_output(res)
+                for (box_pts, text, conf) in parsed:
+                    pts = np.array(box_pts, dtype=np.int32)
+                    xs = pts[:, 0]
+                    ys = pts[:, 1]
                     local_bbox = [int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())]
                     raw.append({
                         "text": str(text).strip(),
                         "bbox": [int(v) for v in _to_full(local_bbox)],
                         "confidence": float(conf),
                         "variant": "region",
-                        "engine": "easyocr"
+                        "engine": "paddleocr_region"
                     })
             except Exception as e:
-                log.debug(f"EasyOCR failed on region {bbox}: {e}")
+                log.debug(f"PaddleOCR region-based failed on {bbox}: {e}")
 
     return raw
