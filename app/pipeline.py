@@ -23,7 +23,7 @@ from bbox_visualize import save_bbox_image
 
 
 def anonymize_dicom_file(input_path, before_output_path, output_path,
-                          data_snapshot_path, paddle_ocr, easy_ocr, analyzer,
+                          data_snapshot_path, paddle_ocr, analyzer,
                           keystore, deid_model=None, medical_ner=None, gliner_model=None):
     """
     Full 7-stage anonymization pipeline for a single DICOM file: burned-in
@@ -120,7 +120,7 @@ def anonymize_dicom_file(input_path, before_output_path, output_path,
 
         # ── Stage 3: OCR ──────────────────────────────────────────────────────
         log.info("  [Stage 3] Running OCR text detection on candidate regions...")
-        raw_det = detect_text_in_regions(ocr_frame, text_regions, paddle_ocr, easy_ocr)
+        raw_det = detect_text_in_regions(ocr_frame, text_regions, paddle_ocr=paddle_ocr)
         log.info(f"            Raw detections: {len(raw_det)}")
 
         # ── Stage 4: Classify ─────────────────────────────────────────────────
@@ -170,7 +170,7 @@ def anonymize_dicom_file(input_path, before_output_path, output_path,
         verify_frame = cleaned_pixels[0] if cleaned_pixels.ndim == 3 else cleaned_pixels
         cleaned_pixels_final = cleaned_pixels.copy()
         verify_clean, status = verify_redaction(
-            verify_frame, phi_regions, paddle_ocr, easy_ocr, analyzer
+            verify_frame, phi_regions, paddle_ocr=paddle_ocr, analyzer=analyzer
         )
         if cleaned_pixels.ndim == 3:
             cleaned_pixels_final[0] = verify_clean

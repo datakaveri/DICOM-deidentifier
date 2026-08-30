@@ -102,8 +102,27 @@ def merge_horizontal_lines(detections, max_gap_factor=2.5, min_v_overlap=0.45):
 
 
 
+def _containment(a, b):
+    """Returns fraction of box `a` that is contained inside box `b`."""
+    xA = max(a[0], b[0]); yA = max(a[1], b[1])
+    xB = min(a[2], b[2]); yB = min(a[3], b[3])
+    inter = max(0, xB - xA) * max(0, yB - yA)
+    areaA = max(1, (a[2]-a[0]) * (a[3]-a[1]))
+    return inter / float(areaA)
+
+
+def _should_merge(box_a, box_b, iou_thresh=0.3):
+    """Merge if IoU > threshold OR if one box contains >70% of the other."""
+    if _iou(box_a, box_b) > iou_thresh:
+        return True
+    if _containment(box_a, box_b) > 0.70 or _containment(box_b, box_a) > 0.70:
+        return True
+    return False
+
+
 def merge_detections(raw, iou_thresh=0.3):
-    """NMS-style merge of overlapping boxes from all OCR engine+variant passes."""
+    """NMS-style merge of overlapping boxes from all OCR engine+variant passes.
+    Uses both IoU and containment checks to catch near-duplicate bboxes."""
     if not raw:
         return []
     sorted_det = sorted(raw, key=lambda x: x["confidence"], reverse=True)
@@ -113,7 +132,7 @@ def merge_detections(raw, iou_thresh=0.3):
         group = [cur]
         remaining = []
         for d in sorted_det:
-            if _iou(cur["bbox"], d["bbox"]) > iou_thresh:
+            if _should_merge(cur["bbox"], d["bbox"], iou_thresh):
                 group.append(d)
             else:
                 remaining.append(d)
@@ -127,18 +146,29 @@ def merge_detections(raw, iou_thresh=0.3):
                      int(bboxes[:,2].max()), int(bboxes[:,3].max())],
             "confidence": min(1.0, max_conf),
         })
-    merged = merge_horizontal_lines(merged)
-    return merged
+
+    # Post-merge dedup: remove any remaining near-duplicate boxes
+    deduped = []
+    for det in merged:
+        is_dup = False
+        for existing in deduped:
+            if _containment(det["bbox"], existing["bbox"]) > 0.80:
+                # det is mostly inside existing — skip it, but widen existing
+                existing["bbox"][0] = min(existing["bbox"][0], det["bbox"][0])
+                existing["bbox"][1] = min(existing["bbox"][1], det["bbox"][1])
+                existing["bbox"][2] = max(existing["bbox"][2], det["bbox"][2])
+                existing["bbox"][3] = max(existing["bbox"][3], det["bbox"][3])
+                if len(det["text"]) > len(existing["text"]):
+                    existing["text"] = det["text"]
+                is_dup = True
+                break
+        if not is_dup:
+            deduped.append(det)
+
+    deduped = merge_horizontal_lines(deduped)
+    return deduped
 
 
-def _zone_for_bbox(bbox, w, h):
-    y_mid = (bbox[1] + bbox[3]) / 2.0
-    x_mid = (bbox[0] + bbox[2]) / 2.0
-    in_border = (
-        y_mid < h * 0.25 or y_mid > h * 0.75 or
-        x_mid < w * 0.15 or x_mid > w * 0.85
-    )
-    return "border" if in_border else "anatomy"
 
 
 def expand_phi_blocks(merged, phi_regions, image_shape):
@@ -188,9 +218,8 @@ def expand_phi_blocks(merged, phi_regions, image_shape):
                     if _is_clinical(sibling_text):
                         log.info(f"    KEEP-SIBLING (block_expand_override): '{sibling_text}' @ {list(b)}")
                         continue
-                    zone = _zone_for_bbox(list(b), w, h)
-                    log.info(f"    REDACT-{zone.upper()} (block_expand): '{sibling_text}' @ {list(b)}")
-                    phi_regions.append({"text": sibling_text, "bbox": list(b), "zone": zone})
+                    log.info(f"    REDACT (block_expand): '{sibling_text}' @ {list(b)}")
+                    phi_regions.append({"text": sibling_text, "bbox": list(b)})
                     phi_bboxes.add(b)
                     added += 1
     if added:
@@ -407,20 +436,18 @@ def classify_phi(merged, image_shape, analyzer=None, gliner_model=None, medical_
             is_phi = False
             reason.append("clinical:exposure_number")
 
-        # Condition 6: Spatial / Default Fallback
+        # Condition 6: Default Fallback
         else:
-            in_border = _zone_for_bbox(bbox, w, h) == "border"
-            if in_border and re.search(r'[A-Za-z]', clean_text):
+            if re.search(r'[A-Za-z]', clean_text):
                 is_phi = True
-                reason.append("fallback:suspect_border")
+                reason.append("fallback:unclassified_text")
             else:
                 is_phi = False
-                reason.append("fallback:safe_anatomy")
+                reason.append("fallback:numeric_non_phi")
 
         if is_phi:
-            zone = _zone_for_bbox(bbox, w, h)
-            log.info(f"    REDACT-{zone.upper()} ({', '.join(reason)}): '{text}' @ {bbox}")
-            phi_regions.append({"text": text, "bbox": bbox, "zone": zone})
+            log.info(f"    REDACT ({', '.join(reason)}): '{text}' @ {bbox}")
+            phi_regions.append({"text": text, "bbox": bbox})
         else:
             log.info(f"    KEEP ({', '.join(reason) if reason else 'unclassified'}): '{text}' @ {bbox}")
 

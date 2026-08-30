@@ -52,4 +52,8 @@ app/data/*
 !app/data/.gitkeep
 app/data.zip
 app/secured.json
+secured.json
+venv_deid/
+app/output/
+
 
