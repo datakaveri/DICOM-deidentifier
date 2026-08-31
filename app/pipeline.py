@@ -10,20 +10,21 @@ import datetime
 import numpy as np
 import pydicom
 
-from config import log, ENABLE_TAG_DEIDENTIFICATION
-from image_enhance import enhance_image
-from ocr_detect import detect_text
-from classify import merge_detections, classify_phi, _iou
+from config import log, ENABLE_TAG_DEIDENTIFICATION, BBOX_IMAGE_NAME
+from text_region_detect import detect_text_regions
+from ocr_detect import detect_text_in_regions
+from classify import merge_detections, classify_phi, expand_phi_blocks, _iou
 from phi_tags import load_original_tag_values, match_against_stored_tags
 from masking import redact_pixels
 from verify import verify_redaction
 from dicom_io import write_pixels_to_dicom
 from de_identification.deidentify import deidentify_dataset
+from bbox_visualize import save_bbox_image
 
 
 def anonymize_dicom_file(input_path, before_output_path, output_path,
-                          data_snapshot_path, paddle_ocr, easy_ocr, analyzer,
-                          keystore):
+                          data_snapshot_path, paddle_ocr, analyzer,
+                          keystore, deid_model=None, medical_ner=None, gliner_model=None):
     """
     Full 7-stage anonymization pipeline for a single DICOM file: burned-in
     pixel/OCR redaction (checkpointed to before_output_path, tags still
@@ -95,10 +96,12 @@ def anonymize_dicom_file(input_path, before_output_path, output_path,
             pixels = original_max - pixels
             log.info("  MONOCHROME1 detected — pixel values flipped.")
 
-        # Normalize to 8-bit for OCR pipeline
-        pix_min, pix_max = pixels.min(), pixels.max()
-        if pix_max > pix_min:
-            norm_8 = ((pixels - pix_min) / (pix_max - pix_min) * 255.0).astype(np.uint8)
+        # Robust contrast stretching (1st to 99th percentile) for 8-bit OCR pipeline
+        # Prevents extreme outlier pixels (metal implants, air padding) from crushing text contrast
+        p_min, p_max = np.percentile(pixels, (1.0, 99.0))
+        if p_max > p_min:
+            clipped = np.clip(pixels, p_min, p_max)
+            norm_8 = ((clipped - p_min) / (p_max - p_min) * 255.0).astype(np.uint8)
         else:
             norm_8 = pixels.astype(np.uint8)
 
@@ -110,19 +113,21 @@ def anonymize_dicom_file(input_path, before_output_path, output_path,
             ocr_frame = norm_8
             ocr_pixels = pixels
 
-        # ── Stage 2: Enhancement ──────────────────────────────────────────────
-        log.info("  [Stage 2] Generating enhanced image variants...")
-        variants = enhance_image(ocr_frame)
+        # ── Stage 2: Text region detection (shape-based, no OCR) ──────────────
+        log.info("  [Stage 2] Detecting candidate text regions...")
+        text_regions = detect_text_regions(ocr_frame)
+        log.info(f"            Candidate regions: {len(text_regions)}")
 
         # ── Stage 3: OCR ──────────────────────────────────────────────────────
-        log.info("  [Stage 3] Running OCR text detection...")
-        raw_det = detect_text(variants, paddle_ocr, easy_ocr)
+        log.info("  [Stage 3] Running OCR text detection on candidate regions...")
+        raw_det = detect_text_in_regions(ocr_frame, text_regions, paddle_ocr=paddle_ocr)
         log.info(f"            Raw detections: {len(raw_det)}")
 
         # ── Stage 4: Classify ─────────────────────────────────────────────────
         log.info("  [Stage 4] Classifying detections (PHI vs clinical)...")
         merged     = merge_detections(raw_det)
-        phi_regions = classify_phi(merged, ocr_frame.shape, analyzer)
+        phi_regions = classify_phi(merged, ocr_frame.shape, analyzer, gliner_model, medical_ner, deid_model)
+        phi_regions = expand_phi_blocks(merged, phi_regions, ocr_frame.shape)
         log.info(f"            PHI regions to redact: {len(phi_regions)}")
 
         # ── Step 3: match OCR text against the full original-tag backup ────────
@@ -142,6 +147,11 @@ def anonymize_dicom_file(input_path, before_output_path, output_path,
             {"text": r["text"], "bbox": r["bbox"]} for r in phi_regions
         ]
 
+        # ── Bbox visualization: save the frame with PHI regions boxed ─────────
+        bbox_output_path = os.path.join(os.path.dirname(before_output_path), BBOX_IMAGE_NAME)
+        save_bbox_image(ocr_frame, phi_regions, bbox_output_path)
+        audit["bbox_image_path"] = bbox_output_path
+
         # ── Stage 5: Redact ───────────────────────────────────────────────────
         log.info("  [Stage 5] Redacting PHI pixels (Navier-Stokes inpainting)...")
         if pixels.ndim == 3:
@@ -160,7 +170,7 @@ def anonymize_dicom_file(input_path, before_output_path, output_path,
         verify_frame = cleaned_pixels[0] if cleaned_pixels.ndim == 3 else cleaned_pixels
         cleaned_pixels_final = cleaned_pixels.copy()
         verify_clean, status = verify_redaction(
-            verify_frame, phi_regions, paddle_ocr, easy_ocr, analyzer
+            verify_frame, phi_regions, paddle_ocr=paddle_ocr, analyzer=analyzer
         )
         if cleaned_pixels.ndim == 3:
             cleaned_pixels_final[0] = verify_clean
