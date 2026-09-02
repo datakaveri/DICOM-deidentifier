@@ -289,9 +289,33 @@ def _redact_anatomy_zone(cleaned, x1, y1, x2, y2):
     return cleaned
 
 
-def redact_pixels(image_array, phi_regions, ds=None):
+def _redact_black(cleaned, x1, y1, x2, y2):
     """
-    Character-stroke level pixel redaction with Navier-Stokes neighbor propagation.
+    Fills the whole bbox with black -- the pixel policy's fixed "black" method.
+
+    Black is the array's floor, not literal 0: by the time this runs the
+    pipeline has already flipped a MONOCHROME1 frame into MONOCHROME2 sense
+    (and flips it back afterwards), so the minimum value is what renders as
+    black in the frame's own representation.
+
+    Unlike inpainting this reconstructs nothing and leaves no stroke residue,
+    and unlike blur it is not partially reversible -- which is the one property
+    the burned-in-text pass exists to guarantee.
+    """
+    cleaned[y1:y2, x1:x2] = cleaned.min() if cleaned.size else 0
+    return cleaned
+
+
+def redact_pixels(image_array, phi_regions, ds=None, method="inpaint"):
+    """
+    Pixel redaction over the detected PHI regions.
+
+    method="inpaint" (default, the pre-contract path): zone-aware
+    character-stroke redaction with Navier-Stokes neighbour propagation, which
+    preserves surrounding texture.
+
+    method="black": every PHI bbox is filled solid black. This is what the
+    SPIDEr job config pins (config.PIXEL_POLICY) and it is not a user setting.
 
     Works on native 8-bit OR 16-bit pixel arrays without losing dynamic range.
     Returns (cleaned_array, combined_mask).
@@ -306,6 +330,7 @@ def redact_pixels(image_array, phi_regions, ds=None):
 
     border_count = 0
     anatomy_count = 0
+    black_count = 0
 
     for region in phi_regions:
         x1, y1, x2, y2 = region["bbox"]
@@ -317,7 +342,11 @@ def redact_pixels(image_array, phi_regions, ds=None):
         zone = region.get("zone", "border")
         combined_mask[y1:y2, x1:x2] = 255
 
-        if zone == "border":
+        if method == "black":
+            cleaned = _redact_black(cleaned, x1, y1, x2, y2)
+            black_count += 1
+            log.info(f"  [Stage 5] Black fill applied @ [{x1},{y1},{x2},{y2}]")
+        elif zone == "border":
             cleaned = _redact_border_zone(cleaned, x1, y1, x2, y2)
             border_count += 1
             log.info(f"  [Stage 5] Border fill applied @ [{x1},{y1},{x2},{y2}]")
@@ -327,7 +356,8 @@ def redact_pixels(image_array, phi_regions, ds=None):
             log.info(f"  [Stage 5] Character stroke inpainting @ [{x1},{y1},{x2},{y2}]")
 
     log.info(
-        f"  [Stage 5] Done. Border fills: {border_count} | "
+        f"  [Stage 5] Done. Black fills: {black_count} | "
+        f"Border fills: {border_count} | "
         f"Anatomy inpainting: {anatomy_count} | "
         f"Total pixels masked: {int(np.sum(combined_mask > 0))}"
     )

@@ -21,6 +21,11 @@ app/data.zip
 app/output/
 app/secured.json
 
+# Project-root local-dev volumes (config.py's defaults outside the container)
+data/
+output/
+preview/
+
 raw_telanagana_dicom_dataset/
 
 tests/

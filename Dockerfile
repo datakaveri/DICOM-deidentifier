@@ -9,7 +9,16 @@
 #                         written back into it.
 # CONFIG (/app/config) — optional, reserved for run-time config overrides.
 # OUTPUT (/app/output) — per-file results, audit logs, and the persistent
-#                         tokenisation/encryption keystore are written here.
+#                         tokenisation/encryption keystore are written here:
+#
+#     <name>/data.json                    original tag snapshot
+#     <name>/phi_tags.json                PHI-bearing tags identified
+#     <name>/before_deidentification.dcm  pixel-redacted, tags original
+#     <name>/after_deidentification.dcm   pixel-redacted + tags de-identified
+#     <name>/pipeline_audit.json          pixel redaction audit
+#     <name>/tag_audit.json               per-tag technique audit
+#     manifest.json                       run-level summary of every file
+#     keystore/secured.json               token/key material, reused across runs
 #
 #   docker run --rm \
 #     -v /path/to/input/dicoms:/app/data \
@@ -44,6 +53,14 @@ WORKDIR /app
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
+
+# Upgrade pip before anything else. The pip 23.0.1 that ships in
+# python:3.10-slim rejects current typing_extensions/Jinja2 wheels over a
+# name-normalisation mismatch ("expected 'typing-extensions', but metadata
+# has 'typing_extensions'"), falls back to their sdists, and then can't build
+# them because the PyTorch index below carries no flit_core. Newer pip
+# normalises the names and takes the wheels.
+RUN pip install --no-cache-dir --upgrade pip
 
 # CPU-only PyTorch first (easyocr depends on torch/torchvision; installing
 # the CPU wheel explicitly avoids pulling the much larger default CUDA build,

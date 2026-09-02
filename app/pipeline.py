@@ -10,7 +10,7 @@ import datetime
 import numpy as np
 import pydicom
 
-from config import log, ENABLE_TAG_DEIDENTIFICATION, BBOX_IMAGE_NAME
+from config import log, ENABLE_TAG_DEIDENTIFICATION, BBOX_IMAGE_NAME, SAVE_BBOX_PREVIEW
 from text_region_detect import detect_text_regions
 from ocr_detect import detect_text_in_regions
 from classify import merge_detections, classify_phi, expand_phi_blocks, _iou
@@ -18,24 +18,48 @@ from phi_tags import load_original_tag_values, match_against_stored_tags
 from masking import redact_pixels
 from verify import verify_redaction
 from dicom_io import write_pixels_to_dicom
-from de_identification.deidentify import deidentify_dataset
+from de_identification.deidentify import deidentify_dataset, deidentify_dataset_from_config
 from bbox_visualize import save_bbox_image
+
+
+def _deidentify_tags(ds, keystore, secrets, job_config):
+    """Runs the tag-level pass selected by `job_config`, mutating `ds`."""
+    if job_config is not None:
+        return deidentify_dataset_from_config(ds, keystore, secrets, job_config)
+
+    if not ENABLE_TAG_DEIDENTIFICATION:
+        log.info("  Tag de-identification skipped (DICOM header tags preserved 100% untouched).")
+        return []
+
+    return deidentify_dataset(ds, keystore)
 
 
 def anonymize_dicom_file(input_path, before_output_path, output_path,
                           data_snapshot_path, paddle_ocr, easy_ocr, analyzer,
-                          keystore, deid_model=None, medical_ner=None, gliner_model=None):
+                          keystore, deid_model=None, medical_ner=None, gliner_model=None,
+                          job_config=None, secrets=None):
     """
     Full 7-stage anonymization pipeline for a single DICOM file: burned-in
     pixel/OCR redaction (checkpointed to before_output_path, tags still
-    original), then tag-level de-identification (hash/mask/suppress per
-    de_identification/tag_mapping.py) as the last step, saved to output_path.
+    original), then tag-level de-identification as the last step, saved to
+    output_path.
 
     `keystore` should be one shared KeyStore instance reused across every
     file in a batch, so hash/tokenise/encrypt values stay consistent across
     the whole set. `data_snapshot_path` is this file's own original-tag
     snapshot (per phi_tags.dump_original_tags), used for the Step 3
     burned-in-text cross-check.
+
+    `job_config` selects the tag policy, and only the tag policy:
+
+      - None -- the pre-contract fixed policy (de_identification/tag_mapping.py:
+        hash PatientID, mask dates, delete direct identifiers), unchanged.
+      - a JobConfig -- the SPIDEr document's `tag_actions`, with `secrets`
+        carrying the run's hashing salt.
+
+    A JobConfig also pins the pixel method ("black") and makes verification
+    strict, and its caller routes before_output_path -- which still holds every
+    original tag value -- under TEMP_DIR rather than the output volume.
 
     Returns an audit dict.
     """
@@ -58,9 +82,23 @@ def anonymize_dicom_file(input_path, before_output_path, output_path,
         "error": None
     }
 
+    pixel_method = job_config.pixel["method"] if job_config else "inpaint"
+    strict_verify = job_config is not None
+    fail_on_unparsable = job_config.fail_on_unparsable if job_config else False
+
     try:
         # ── Read DICOM ────────────────────────────────────────────────────────
-        ds = pydicom.dcmread(input_path, force=True)
+        # force=True lets a batch survive a file missing the DICM preamble. Under
+        # fail_on_unparsable it is off on purpose: force=True turns an unparsable
+        # file into an empty Dataset, which then sails through every stage
+        # "successfully" with nothing found to remove and gets written out. A
+        # DICOM that cannot be parsed must fail loudly instead.
+        ds = pydicom.dcmread(input_path, force=not fail_on_unparsable)
+        if fail_on_unparsable and "SOPClassUID" not in ds:
+            raise ValueError(
+                "Parsed no SOPClassUID — the file is not a readable DICOM. "
+                "Refusing to emit it rather than pass it through un-de-identified."
+            )
 
         audit["modality"] = getattr(ds, "Modality", "Unknown")
         rows = getattr(ds, "Rows", "?")
@@ -72,9 +110,9 @@ def anonymize_dicom_file(input_path, before_output_path, output_path,
             log.warning(f"  No pixel data in {filename}. Saving metadata-only.")
             os.makedirs(os.path.dirname(before_output_path), exist_ok=True)
             ds.save_as(before_output_path, write_like_original=False)
-            audit["deidentified_tags"] = deidentify_dataset(ds, keystore)
+            audit["deidentified_tags"] = _deidentify_tags(ds, keystore, secrets, job_config)
             ds.save_as(output_path, write_like_original=False)
-            audit["verification_status"] = "SKIPPED (no pixels)"
+            audit["verification_status"] = "SKIPPED" if job_config else "SKIPPED (no pixels)"
             return audit
 
         pixels = ds.pixel_array.copy()
@@ -148,9 +186,14 @@ def anonymize_dicom_file(input_path, before_output_path, output_path,
         ]
 
         # ── Bbox visualization: save the frame with PHI regions boxed ─────────
-        bbox_output_path = os.path.join(os.path.dirname(before_output_path), BBOX_IMAGE_NAME)
-        save_bbox_image(ocr_frame, phi_regions, bbox_output_path)
-        audit["bbox_image_path"] = bbox_output_path
+        # Opt-in only (SKALD_SAVE_BBOX_PREVIEW=1): this PNG is the frame as it
+        # looked BEFORE redaction, so it still carries the burned-in PHI in the
+        # clear. Handy for tuning detection locally, unacceptable to drop into
+        # a de-identified output volume by default.
+        if SAVE_BBOX_PREVIEW:
+            bbox_output_path = os.path.join(os.path.dirname(before_output_path), BBOX_IMAGE_NAME)
+            save_bbox_image(ocr_frame, phi_regions, bbox_output_path)
+            audit["bbox_image_path"] = bbox_output_path
 
         # ── Stage 5: Redact ───────────────────────────────────────────────────
         log.info("  [Stage 5] Redacting PHI pixels (Navier-Stokes inpainting)...")
@@ -160,17 +203,18 @@ def anonymize_dicom_file(input_path, before_output_path, output_path,
             for i in range(pixels.shape[0]):
                 frame_pix = pixels[i]
                 frame_phi = phi_regions  # same regions for all frames
-                cleaned_frame, _ = redact_pixels(frame_pix, frame_phi)
+                cleaned_frame, _ = redact_pixels(frame_pix, frame_phi, method=pixel_method)
                 cleaned_frames.append(cleaned_frame)
             cleaned_pixels = np.stack(cleaned_frames, axis=0)
         else:
-            cleaned_pixels, _ = redact_pixels(pixels, phi_regions)
+            cleaned_pixels, _ = redact_pixels(pixels, phi_regions, method=pixel_method)
 
         # ── Stage 6: Verify ───────────────────────────────────────────────────
         verify_frame = cleaned_pixels[0] if cleaned_pixels.ndim == 3 else cleaned_pixels
         cleaned_pixels_final = cleaned_pixels.copy()
         verify_clean, status = verify_redaction(
-            verify_frame, phi_regions, paddle_ocr, easy_ocr, analyzer
+            verify_frame, phi_regions, paddle_ocr, easy_ocr, analyzer,
+            method=pixel_method, strict=strict_verify
         )
         if cleaned_pixels.ndim == 3:
             cleaned_pixels_final[0] = verify_clean
@@ -190,12 +234,8 @@ def anonymize_dicom_file(input_path, before_output_path, output_path,
         ds.save_as(before_output_path, write_like_original=False)
         log.info(f"  [Checkpoint] Pixel-redacted DICOM saved (tags still original): {before_output_path}")
 
-        # ── Last: tag de-identification (hash PatientID, mask dates, etc.) ────
-        if ENABLE_TAG_DEIDENTIFICATION:
-            audit["deidentified_tags"] = deidentify_dataset(ds, keystore)
-        else:
-            log.info("  Tag de-identification skipped (DICOM header tags preserved 100% untouched).")
-            audit["deidentified_tags"] = []
+        # ── Last: tag de-identification ──────────────────────────────────────
+        audit["deidentified_tags"] = _deidentify_tags(ds, keystore, secrets, job_config)
 
         # ── Save as DICOM ONLY ────────────────────────────────────────────────
         ds.save_as(output_path, write_like_original=False)
