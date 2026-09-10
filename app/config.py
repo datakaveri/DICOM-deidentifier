@@ -2,10 +2,11 @@
 config.py — shared configuration, constants, and logging setup for the
 DICOM anonymization pipeline.
 
-Policy: DICOM tag VALUES are left exactly as-is everywhere in this pipeline
-(only UIDs are regenerated and private/vendor tags are stripped, so the file
-can't be linked back to the original study). No tag is hashed, removed, or
-generalized. PHI is removed from the pixel data instead (see masking.py).
+Architecture:
+  - Pixel Redaction: Character stroke segmentation + Navier-Stokes neighbor reconstruction
+    for burned-in PHI text (preserves underlying tissue and clinical markers).
+  - Tag De-Identification: Header tag tokenization, hashing, encryption, and suppression
+    per tag_mapping.py with keystore persistence (secured.json).
 """
 
 import os
@@ -39,10 +40,11 @@ FINAL_OUTPUT_NAME = "after_deidentification.dcm"
 DATA_SNAPSHOT_NAME = "data.json"
 PHI_TAGS_SNAPSHOT_NAME = "phi_tags.json"
 PIPELINE_AUDIT_SNAPSHOT_NAME = "pipeline_audit.json"
+BBOX_IMAGE_NAME = "bbox_regions.png"
 
 # Set to True to enable DICOM header tag de-identification (hashing/masking/FPE).
 # Set to False to keep all DICOM header tags 100% original and untouched (focusing solely on burned-in pixel text redaction).
-ENABLE_TAG_DEIDENTIFICATION = False
+ENABLE_TAG_DEIDENTIFICATION = True
 
 # Single consolidated file holding every hash/tokenise/encrypt key used by
 # de_identification/deidentify.py. One KeyStore is loaded from this file,
@@ -73,7 +75,7 @@ PII_PATTERNS = {
     "aadhaar":     r'\b\d{4}\s?\d{4}\s?\d{4}\b',
     "abha":        r'\b\d{2}-\d{4}-\d{4}-\d{4}\b',
     "phone":       r'\b(?:\+91|0)?[6-9]\d{9}\b',
-    "date":        r'\b\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}\b',
+    "date":        r'\b\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}\b|\b\d{4}[-/.]\d{1,2}[-/.]\d{1,2}\b',
     "uhid_mrn":    r'\b(?:UHID|MRN|REG|IPD|OPD|CR|PID|HID)[\s:/-]?\d+\b',
     "age_sex":     r'\b\d{1,3}\s*[/]\s*[MFO]\b',
     "name_prefix": r'\b(?:DR\.?|MR\.?|MRS\.?|MS\.?|SHRI|SMT|S/O|D/O|W/O)\b',

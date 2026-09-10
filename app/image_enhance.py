@@ -1,6 +1,6 @@
 """
 image_enhance.py — Stage 2: image enhancement. Generates contrast variants
-of the 8-bit grayscale image to improve OCR detection rates.
+of the 8-bit grayscale image to improve OCR detection rates. (Updated for OCR pipeline integration)
 """
 
 import numpy as np

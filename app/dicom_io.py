@@ -1,6 +1,6 @@
 """
 dicom_io.py — Stage 7: write anonymized pixels back into the DICOM dataset
-with correct pixel-descriptor tag updates.
+with correct pixel-descriptor tag updates. (Updated for OCR pipeline integration)
 """
 
 import numpy as np
