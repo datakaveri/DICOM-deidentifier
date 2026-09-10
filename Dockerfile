@@ -1,23 +1,27 @@
-# SKALD-DICOM — DICOM burned-in text + tag de-identification pipeline.
+# ==============================================================================
+# DICOM De-Identification Pipeline — Production Container
+# ==============================================================================
 #
-# Runs as a batch job: reads every *.dcm file under /app/data, applies pixel
-# (OCR-based burned-in text redaction) and tag-level (hash/tokenise/encrypt)
-# de-identification, and writes results + audit logs under /app/output.
+# Processes radiology DICOM files (.dcm) at two levels in a single unified pass:
+#   1. Burned-In Pixel Text Redaction:
+#      - Primary OCR: PaddleOCR (PP-OCRv4)
+#      - Multi-Model PHI Classification: Stanford De-ID, Biomedical NER, GLiNER,
+#        Microsoft Presidio, Regex PII patterns, and Clinical Allowlist
+#      - Character Stroke & Shadow Segmentation: Top-Hat + Drop-shadow capture
+#      - Unified Inpainting: Navier-Stokes neighbor reconstruction
+#      - Verification: Two-tier fast morphological stroke gate with OCR fallback
+#   2. DICOM Header Tag De-Identification:
+#      - Per-tag tokenization, hashing, AES-CBC format-preserving encryption,
+#        masking, and UID regeneration per DICOM PS 3.15 Profile (secured.json).
 #
-# CPU-only by default (see the torch install step below) — no CUDA/nvidia
-# runtime required. To build a GPU variant, swap the CPU torch wheel below
-# for a CUDA build.
-#
-# OCR uses EasyOCR only (PaddleOCR was dropped: PaddlePaddle and PyTorch
-# each bundle conflicting native allocators/OpenMP runtimes, and running
-# both in the same process reliably corrupted the heap once real model
-# work started — see ocr_detect.py, which already tolerates a single OCR
-# engine).
+# CPU-only by default — no CUDA runtime required. To build for GPU, swap the
+# CPU PyTorch/Paddle wheels for CUDA builds.
+# All model weights are baked in during build time for air-gapped/offline execution.
+# ==============================================================================
 
 FROM python:3.10-slim
 
-# System libraries required by opencv-python-headless / easyocr at
-# import/runtime (image codecs, OpenMP, X11 stubs some wheels still link).
+# System libraries required by opencv-python-headless, PaddleOCR, and PyTorch
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libgl1 \
         libglib2.0-0 \
@@ -29,28 +33,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# CPU-only PyTorch first (easyocr depends on torch/torchvision; installing
-# the CPU wheel explicitly avoids pulling the much larger default CUDA build).
+# Install CPU-only PyTorch and torchvision explicitly to avoid massive CUDA wheels
 RUN pip install --no-cache-dir torch==2.2.2 torchvision==0.17.2 \
         --index-url https://download.pytorch.org/whl/cpu
 
+# Install Python requirements
 COPY requirements.txt .
-# Install the spaCy model as a direct wheel URL, pinned to a version
-# compatible with spacy==3.7.4 above. `spacy download` shells out to a
-# GitHub compatibility-check API that has proven unreliable in CI/Docker
-# builds (it can return a malformed release URL); a pinned wheel avoids
-# that lookup entirely.
 RUN pip install --no-cache-dir -r requirements.txt \
     && pip install --no-cache-dir \
         https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1-py3-none-any.whl
 
+# Copy application source code
 COPY app/ .
 
-# Pre-download OCR/NLP model weights at BUILD time so the running container
-# never needs outbound network access (required for air-gapped/TEE
-# deployments). Needs network access during `docker build` only.
+# Pre-download OCR (PaddleOCR), NLP, and Transformer model weights at BUILD time.
+# Ensures the container can run in 100% air-gapped / offline healthcare environments.
 RUN python -c "from engines import check_gpu_available, initialize_engines; initialize_engines(use_gpu=check_gpu_available())"
 
+# Create standard runtime directories
 RUN mkdir -p /app/data /app/config /app/output
 
 ENV SKALD_DATA_DIR=/app/data \
@@ -58,4 +58,5 @@ ENV SKALD_DATA_DIR=/app/data \
     SKALD_OUTPUT_DIR=/app/output \
     PYTHONUNBUFFERED=1
 
-CMD ["python", "-m", "de_identification.run"]
+# Default entry point runs the batch pipeline across all DICOMs in /app/data
+CMD ["python", "main.py"]

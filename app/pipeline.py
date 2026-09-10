@@ -205,6 +205,20 @@ def anonymize_dicom_file(input_path, before_output_path, output_path,
         log.info(f"  [DONE] Anonymized DICOM saved: {output_path}")
         log.info(f"         Status: {status}")
 
+        # Also save normalized 8-bit preview PNG for quick inspection
+        try:
+            vis_source = cleaned_pixels_final[0] if cleaned_pixels_final.ndim == 3 else cleaned_pixels_final
+            pmin, pmax = np.percentile(vis_source, (1.0, 99.0))
+            if pmax > pmin:
+                preview_8 = np.clip((vis_source - pmin) / (pmax - pmin) * 255.0, 0, 255).astype(np.uint8)
+            else:
+                preview_8 = vis_source.astype(np.uint8)
+            import cv2
+            preview_p = os.path.join(os.path.dirname(output_path), "after_preview.png")
+            cv2.imwrite(preview_p, preview_8)
+        except Exception as pe:
+            log.warning(f"  Could not save after_preview.png: {pe}")
+
     except Exception as e:
         log.error(f"  [ERROR] {filename}: {e}", exc_info=True)
         audit["error"] = str(e)

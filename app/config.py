@@ -2,10 +2,11 @@
 config.py — shared configuration, constants, and logging setup for the
 DICOM anonymization pipeline.
 
-Policy: DICOM tag VALUES are left exactly as-is everywhere in this pipeline
-(only UIDs are regenerated and private/vendor tags are stripped, so the file
-can't be linked back to the original study). No tag is hashed, removed, or
-generalized. PHI is removed from the pixel data instead (see masking.py).
+Architecture:
+  - Pixel Redaction: Character stroke segmentation + Navier-Stokes neighbor reconstruction
+    for burned-in PHI text (preserves underlying tissue and clinical markers).
+  - Tag De-Identification: Header tag tokenization, hashing, encryption, and suppression
+    per tag_mapping.py with keystore persistence (secured.json).
 """
 
 import os
