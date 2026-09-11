@@ -1,0 +1,50 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IPYNB checkpoints
+.ipynb_checkpoints/
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# Pytest
+.pytest_cache/
+
+# Runtime data/config/output — mounted volumes in deployment, local scratch
+# space in development. Never commit patient DICOM data or key material.
+app/data/*
+!app/data/.gitkeep
+app/config/*
+!app/config/.gitkeep
+app/output/
+*secured.json
+
+# Raw sample dataset — real patient DICOM files, never commit
+raw_telanagana_dicom_dataset/
+app/raw_burned_in_text_samples/
+
+# Ad-hoc visual inspection output (PNG previews of DICOM pixel data)
+preview/
+
+# Project-specific large datasets and temporary test folders
+dicom_samples/
+raw_datasamples_xray_chest/
+anonymized_xray_chest/
+test_outputs/
+
+# Other files ignored from remote repository
+*.docx
+download_chest_xray_dicoms.py
+download_samples.py
+explore_dicom.py
+hybrid_anonymizer.py
+pixel_anonymizer.py
+test_real_dicoms.py
+test_synthetic_burnin.py
+dicom_anonymizer_kaggle.ipynb

@@ -1,0 +1,25 @@
+# ── Core DICOM & Numerical Processing ─────────────────────────────────────────
+pydicom>=2.4.4
+numpy>=1.24.0,<2.0.0
+scipy>=1.11.0
+scikit-image>=0.22.0
+
+# ── Image Processing & Geometry ───────────────────────────────────────────────
+opencv-python-headless>=4.9.0.80
+shapely>=2.0.0
+pyclipper>=1.3.0
+
+# ── OCR Engine (PaddleOCR) ───────────────────────────────────────────────────
+paddlepaddle>=2.6.0
+paddleocr>=2.8.0
+
+# ── NLP & Machine Learning Entity Recognition ─────────────────────────────────
+torch>=2.2.0
+torchvision>=0.17.0
+transformers>=4.40.0
+gliner>=0.2.0
+presidio-analyzer>=2.2.354
+spacy>=3.7.4
+
+# ── Cryptography & De-Identification ──────────────────────────────────────────
+pycryptodome>=3.20.0
