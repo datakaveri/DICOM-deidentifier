@@ -30,6 +30,8 @@ parser.add_argument("--threads", "-t", type=int, default=int(os.getenv("SKALD_TH
                     help=f"CPU threads per worker for PyTorch/Paddle (default: {DEFAULT_THREADS})")
 parser.add_argument("--input-dir", "-i", type=str, default=None,
                     help="Custom input directory containing .dcm files")
+parser.add_argument("--output-dir", "-o", type=str, default=None,
+                    help="Custom output directory to store de-identified files and logs")
 args, _ = parser.parse_known_args()
 
 NUM_WORKERS = args.workers
@@ -91,7 +93,8 @@ def process_single_file(input_path):
 
     stem = os.path.splitext(os.path.basename(input_path))[0]
     safe_stem = re.sub(r'[^a-zA-Z0-9_\-]', '_', stem)[:64]
-    out_dir = os.path.join(OUTPUT_DIR, safe_stem)
+    target_out_dir = args.output_dir or OUTPUT_DIR
+    out_dir = os.path.join(target_out_dir, safe_stem)
     os.makedirs(out_dir, exist_ok=True)
 
     before_output = os.path.join(out_dir, BEFORE_OUTPUT_NAME)
