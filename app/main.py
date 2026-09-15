@@ -16,6 +16,8 @@ same PatientID/AccessionNumber/etc. hashes or tokenises to the same value no
 matter which file in the batch it appears in.
 """
 
+import paddle_env  # noqa: F401 — must be first (PaddleOCR env hardening)
+
 import os
 import glob
 import json

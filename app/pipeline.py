@@ -119,8 +119,18 @@ def anonymize_dicom_file(input_path, before_output_path, output_path,
         log.info(f"            Candidate regions: {len(text_regions)}")
 
         # ── Stage 3: OCR ──────────────────────────────────────────────────────
-        log.info("  [Stage 3] Running OCR text detection on candidate regions...")
-        raw_det = detect_text_in_regions(ocr_frame, text_regions, paddle_ocr=paddle_ocr)
+        # Run PaddleOCR on cropped text regions only (not the full image).
+        # This is dramatically faster because it processes small crops
+        # instead of the entire DICOM pixel array.
+        log.info("  [Stage 3] Running OCR on detected text regions (region-based mode)...")
+        raw_det = detect_text_in_regions(ocr_frame, text_regions, paddle_ocr=paddle_ocr, run_on_regions=True)
+
+        # Fallback: if region-based mode found nothing but we have candidate
+        # regions, run full-image mode as a safety net.
+        if not raw_det and text_regions:
+            log.info("  [Stage 3] Region-based OCR found nothing — falling back to full-image mode...")
+            raw_det = detect_text_in_regions(ocr_frame, text_regions, paddle_ocr=paddle_ocr, run_on_regions=False)
+
         log.info(f"            Raw detections: {len(raw_det)}")
 
         # ── Stage 4: Classify ─────────────────────────────────────────────────

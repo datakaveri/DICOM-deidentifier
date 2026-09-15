@@ -9,13 +9,12 @@ Architecture:
     per tag_mapping.py with keystore persistence (secured.json).
 """
 
+# paddle_env MUST be imported before any PaddlePaddle / PaddleOCR import
+# (disables MKLDNN, caps internal threads, silences Paddle noise).
+import paddle_env  # noqa: F401 — side-effect import
+
 import os
 import logging
-
-# ─── Suppress verbose sub-library logs ───────────────────────────────────────
-os.environ["FLAGS_use_mkldnn"] = "0"
-os.environ["PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT"] = "0"
-os.environ["DISABLE_AUTO_LOGGING_CONFIG"] = "1"
 
 logging.basicConfig(
     level=logging.INFO,
