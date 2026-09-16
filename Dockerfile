@@ -41,7 +41,8 @@ ENV PIP_DEFAULT_TIMEOUT=300
 ENV PIP_RETRIES=5
 
 # Install CPU-only PyTorch and torchvision explicitly to avoid massive CUDA wheels
-RUN pip install --no-cache-dir torch==2.2.2 torchvision==0.17.2 \
+# torch>=2.5.0 is required by modern transformers
+RUN pip install --no-cache-dir "torch>=2.5.0" torchvision \
         --extra-index-url https://download.pytorch.org/whl/cpu
 
 # Install CPU-only PaddlePaddle explicitly (avoids Windows/CUDA issues)

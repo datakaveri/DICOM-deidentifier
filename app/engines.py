@@ -60,9 +60,24 @@ def initialize_engines(use_gpu=False):
     paddle_ocr = None
     if PADDLE_AVAILABLE:
         try:
-            # Native PaddleOCR v2.x (Linux/Ubuntu - PP-OCRv4 models)
+            # Native PaddleOCR (Linux/Ubuntu - PP-OCRv4 models)
+            # Try with use_gpu parameter first (older PaddleOCR)
             paddle_ocr = PaddleOCR(use_angle_cls=False, lang='en', use_gpu=use_gpu)
             print("  [OK] PaddleOCR (Native) initialized as PRIMARY OCR")
+        except (TypeError, ValueError) as e:
+            try:
+                # Newer PaddleOCR versions may accept device='gpu'/'cpu'
+                device_str = 'gpu' if use_gpu else 'cpu'
+                paddle_ocr = PaddleOCR(use_angle_cls=False, lang='en', device=device_str)
+                print(f"  [OK] PaddleOCR (Native, device={device_str}) initialized as PRIMARY OCR")
+            except Exception:
+                try:
+                    # Or simple init without use_gpu/device
+                    paddle_ocr = PaddleOCR(use_angle_cls=False, lang='en')
+                    print("  [OK] PaddleOCR (Native) initialized as PRIMARY OCR")
+                except Exception as ex:
+                    log.warning(f"Native PaddleOCR init fallback failed: {ex}")
+                    print(f"  [WARN] PaddleOCR init failed: {ex}")
         except Exception as e:
             log.warning(f"Native PaddleOCR init failed: {e}")
             print(f"  [WARN] PaddleOCR init failed: {e}")
