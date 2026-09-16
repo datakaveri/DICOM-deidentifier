@@ -24,11 +24,14 @@ FROM python:3.10-slim
 # System libraries required by opencv-python-headless, PaddleOCR, and PyTorch
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libgl1 \
+        libgl1-mesa-glx \
         libglib2.0-0 \
         libsm6 \
         libxext6 \
         libxrender1 \
         libgomp1 \
+        gcc \
+        g++ \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -36,6 +39,9 @@ WORKDIR /app
 # Install CPU-only PyTorch and torchvision explicitly to avoid massive CUDA wheels
 RUN pip install --no-cache-dir torch==2.2.2 torchvision==0.17.2 \
         --index-url https://download.pytorch.org/whl/cpu
+
+# Install CPU-only PaddlePaddle explicitly (avoids Windows/CUDA issues)
+RUN pip install --no-cache-dir paddlepaddle==2.6.2
 
 # Install Python requirements
 COPY requirements.txt .

@@ -6,16 +6,17 @@ scikit-image>=0.22.0
 
 # ── Image Processing & Geometry ───────────────────────────────────────────────
 opencv-python-headless>=4.9.0.80
+Pillow>=10.0.0
 shapely>=2.0.0
 pyclipper>=1.3.0
 
 # ── OCR Engine (PaddleOCR) ───────────────────────────────────────────────────
-paddlepaddle>=2.6.0
+# NOTE: paddlepaddle is installed separately in Dockerfile as CPU-only wheel
+#       to avoid platform-specific build issues (Windows PaddleOCR errors).
 paddleocr>=2.8.0
 
 # ── NLP & Machine Learning Entity Recognition ─────────────────────────────────
-torch>=2.2.0
-torchvision>=0.17.0
+# NOTE: torch & torchvision are installed separately in Dockerfile as CPU-only.
 transformers>=4.40.0
 gliner>=0.2.0
 presidio-analyzer>=2.2.354
