@@ -37,7 +37,7 @@ WORKDIR /app
 
 # Install CPU-only PyTorch and torchvision explicitly to avoid massive CUDA wheels
 RUN pip install --no-cache-dir torch==2.2.2 torchvision==0.17.2 \
-        --index-url https://download.pytorch.org/whl/cpu
+        --extra-index-url https://download.pytorch.org/whl/cpu
 
 # Install CPU-only PaddlePaddle explicitly (avoids Windows/CUDA issues)
 RUN pip install --no-cache-dir paddlepaddle==2.6.2
