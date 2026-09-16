@@ -35,6 +35,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
+# Upgrade pip and set global timeout/retries for slow networks
+RUN pip install --upgrade pip
+ENV PIP_DEFAULT_TIMEOUT=300
+ENV PIP_RETRIES=5
+
 # Install CPU-only PyTorch and torchvision explicitly to avoid massive CUDA wheels
 RUN pip install --no-cache-dir torch==2.2.2 torchvision==0.17.2 \
         --extra-index-url https://download.pytorch.org/whl/cpu
@@ -44,8 +49,10 @@ RUN pip install --no-cache-dir paddlepaddle==2.6.2
 
 # Install Python requirements
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt \
-    && pip install --no-cache-dir \
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Download spaCy model separately (better layer caching)
+RUN pip install --no-cache-dir \
         https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1-py3-none-any.whl
 
 # Copy application source code
