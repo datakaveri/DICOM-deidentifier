@@ -85,10 +85,20 @@ def initialize_engines(use_gpu=False):
     analyzer = None
     if PRESIDIO_AVAILABLE:
         try:
-            analyzer = AnalyzerEngine()
-            print("  [OK] Presidio NLP Analyzer initialized")
+            from presidio_analyzer.nlp_engine import NlpEngineProvider
+            provider = NlpEngineProvider(nlp_configuration={
+                "nlp_engine_name": "spacy",
+                "models": [{"lang_code": "en", "model_name": "en_core_web_sm"}]
+            })
+            nlp_engine = provider.create_engine()
+            analyzer = AnalyzerEngine(nlp_engine=nlp_engine)
+            print("  [OK] Presidio NLP Analyzer initialized (en_core_web_sm)")
         except Exception as e:
-            print(f"  [WARN] Presidio failed to init: {e}")
+            try:
+                analyzer = AnalyzerEngine()
+                print("  [OK] Presidio NLP Analyzer initialized (default)")
+            except Exception as ex:
+                print(f"  [WARN] Presidio failed to init: {ex}")
 
     deid_model = None
     if TRANSFORMERS_AVAILABLE:

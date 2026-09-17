@@ -21,8 +21,14 @@
 
 FROM python:3.10-slim
 
-# System libraries required by opencv-python-headless, PaddleOCR, and PyTorch
+# Prevent interactive prompts during installation
+ENV DEBIAN_FRONTEND=noninteractive
+
+# System libraries required by opencv-python-headless, PaddleOCR, PyTorch, and downloads
 RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        git \
         libgl1 \
         libglib2.0-0 \
         libsm6 \
@@ -35,10 +41,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Upgrade pip and set global timeout/retries for slow networks
+# Upgrade pip and configure network resiliency & environment variables
 RUN pip install --upgrade pip
-ENV PIP_DEFAULT_TIMEOUT=300
-ENV PIP_RETRIES=5
+ENV PIP_DEFAULT_TIMEOUT=300 \
+    PIP_RETRIES=5 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app \
+    PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python \
+    HF_HOME=/root/.cache/huggingface \
+    PADDLE_HOME=/root/.paddleocr
 
 # Install CPU-only PyTorch and torchvision explicitly to avoid massive CUDA wheels
 # torch>=2.5.0 is required by modern transformers
@@ -61,15 +72,17 @@ COPY app/ .
 
 # Pre-download OCR (PaddleOCR), NLP, and Transformer model weights at BUILD time.
 # Ensures the container can run in 100% air-gapped / offline healthcare environments.
-RUN python -c "from engines import check_gpu_available, initialize_engines; initialize_engines(use_gpu=check_gpu_available())"
+RUN python -c "from engines import check_gpu_available, initialize_engines; p, a, d, m, g = initialize_engines(use_gpu=check_gpu_available()); assert p is not None, 'PaddleOCR initialization failed!'"
+
+# Ensure model cache is readable for any runtime user
+RUN chmod -R 777 /root || true
 
 # Create standard runtime directories
 RUN mkdir -p /app/data /app/config /app/output
 
 ENV SKALD_DATA_DIR=/app/data \
     SKALD_CONFIG_DIR=/app/config \
-    SKALD_OUTPUT_DIR=/app/output \
-    PYTHONUNBUFFERED=1
+    SKALD_OUTPUT_DIR=/app/output
 
 # Default entry point runs the batch pipeline across all DICOMs in /app/data
 CMD ["python", "main.py"]
