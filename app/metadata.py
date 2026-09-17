@@ -6,7 +6,7 @@ identifiers, etc., per DICOM tag) is now handled by the more complete
 de_identification.deidentify.deidentify_dataset(), driven by the
 tag -> technique mapping in de_identification/tag_mapping.py. This module is
 kept only so any external caller still importing it doesn't hard-fail, but
-sanitize_metadata() here is a no-op beyond private-tag stripping.
+sanitize_metadata() here is a no-op beyond private-tag stripping. (Updated for OCR pipeline integration)
 """
 
 from config import log

@@ -1,71 +1,87 @@
-# SKALD-DICOM
+# DICOM De-Identification Pipeline
 
-De-identification pipeline for radiology DICOM files, built for the SPIDEr platform. Removes Protected Health Information (PHI) at two levels in a single pass:
+De-identification pipeline for radiology DICOM files. Removes Protected Health Information (PHI) at two levels in a single unified pass:
 
-1. **Burned-in pixel text** — OCR (EasyOCR) finds names, IDs, dates, phone numbers, and other PHI printed directly into the image, classifies it against a clinical allowlist and NLP (Presidio), and redacts it with structure-preserving inpainting (no quality loss to the underlying anatomy). PaddleOCR is supported as an optional second engine in `engines.py`/`ocr_detect.py` for local, non-containerized use, but is deliberately left out of the Docker image — running PaddlePaddle and PyTorch in the same process corrupts the heap once both load real model weights.
-2. **DICOM tag values** — every header tag is passed through a per-tag technique (hash, tokenise, format-preserving encrypt, suppress, or retain) defined in [`app/de_identification/tag_mapping.py`](app/de_identification/tag_mapping.py), plus private/vendor tag stripping and UID regeneration.
+1. **Burned-in Pixel Text Redaction** — OCR (**PaddleOCR**) detects burned-in text. An ensemble classification stack (**Stanford De-ID**, **Biomedical NER**, **GLiNER-BioMed**, **Microsoft Presidio**, and clinical allowlists) distinguishes patient PHI from medical findings and anatomy markers. Redaction uses **character stroke & drop-shadow segmentation** combined with **Navier-Stokes neighbor inpainting**, eliminating dark silhouettes while preserving underlying bone and tissue textures. A two-tier verification gate ensures complete anonymization with near-zero latency overhead.
+2. **DICOM Tag De-Identification** — Every header tag is processed through a per-tag technique (cryptographic hash, tokenisation, format-preserving encryption, date masking, suppression, or retention) defined in [`app/de_identification/tag_mapping.py`](app/de_identification/tag_mapping.py), alongside private/vendor tag stripping and UID regeneration.
 
-The output is always a valid `.dcm` file — never a PNG/JPEG export — so downstream DICOM tooling keeps working.
+The output is always a valid `.dcm` file (with optional high-resolution `.png` visual preview for audits).
 
-## Project layout
+---
+
+## Project Layout
 
 ```
-app/
-  main.py                  # debug entrypoint: pixel redaction only, single file (app/data/input.dcm)
-  de_identification/run.py # main entrypoint: full pipeline, batches every *.dcm under DATA_DIR
-  config.py                # paths (env-var overridable), PII patterns, clinical allowlist
-  pipeline.py               # 7-stage pixel redaction pipeline
-  de_identification/        # tag-level de-identification (hashing, tokenisation, FPE, keystore)
-  data/, config/, output/    # local dev mirror of the container's mounted volumes
-tests/                      # pytest suite
-Dockerfile
-requirements.txt
+├── Dockerfile                  # Production container definition (air-gapped & offline-ready)
+├── requirements.txt            # Pinned dependencies (PaddleOCR, PyTorch, Presidio, GLiNER)
+├── secured.json                # Shared cryptographic key and token material
+├── app/
+│   ├── main.py                 # Main batch pipeline entry point
+│   ├── config.py               # Paths, environment variables, clinical allowlist, PII regex
+│   ├── engines.py              # PaddleOCR, Presidio, GLiNER, Stanford De-ID model initializers
+│   ├── pipeline.py             # 7-stage anonymization orchestrator
+│   ├── ocr_detect.py           # PaddleOCR full-image and region-based detection
+│   ├── classify.py             # Multi-model PHI vs clinical classification matrix
+│   ├── masking.py              # Character stroke & drop-shadow isolation + Navier-Stokes inpainting
+│   ├── verify.py               # Two-tier verification (Tier 1: Stroke check <1ms, Tier 2: OCR fallback)
+│   ├── dicom_io.py             # Pixel write-back and DICOM descriptor header updates
+│   ├── phi_tags.py             # PHI tag scanner and burned-in tag value cross-checker
+│   ├── bbox_visualize.py       # Visual bbox preview overlay generator
+│   └── de_identification/      # Header tag de-identification engine & keystore
+├── data/                       # Input DICOM files (*.dcm)
+└── output/                     # Anonymized DICOMs, previews, and JSON audit logs
 ```
 
-## Running locally
+---
+
+## Running Locally
 
 ```bash
+# 1. Activate virtual environment
 python -m venv venv && source venv/bin/activate
+
+# 2. Install dependencies
 pip install -r requirements.txt
 python -m spacy download en_core_web_sm
 
-# Drop one or more .dcm files into app/data/, then:
+# 3. Run the batch pipeline
 cd app
-python -m de_identification.run
+python main.py
 ```
 
-Results land under `app/output/<filename>/`: `data.json` (original tag snapshot), `phi_tags.json` (identified PHI tags), `before_deidentification.dcm` (pixel-redacted), `after_deidentification.dcm` (pixel-redacted + tag de-identified), `pipeline_audit.json`, and `tag_audit.json`. A run-level `app/output/manifest.json` summarizes every file processed. Tokenisation/encryption keys persist in `app/output/keystore/` across runs.
+### Outputs Generated (per DICOM file)
+Under `app/output/<sample_name>/`:
+- `after_deidentification.dcm` — Final anonymized DICOM (pixel-redacted + tag de-identified).
+- `after_preview.png` — Normalized visual inspection preview image.
+- `before_deidentification.dcm` — Intermediate checkpoint (pixel-redacted, original tags).
+- `bbox_regions.png` — Bounding boxes of detected PHI annotations.
+- `pipeline_audit.json` — Detailed audit log (redacted regions, execution time, status).
+- `data.json` & `phi_tags.json` — Pre-deidentification tag snapshots.
+
+---
 
 ## Running with Docker
 
 ```bash
-docker build -t skald-dicom .
+# Build the production image (model weights are pre-cached during build)
+docker build -t dicom-deidentifier .
 
+# Run the batch pipeline
 docker run --rm \
   -v /path/to/input/dicoms:/app/data \
   -v /path/to/config:/app/config \
   -v /path/to/output:/app/output \
-  skald-dicom
+  dicom-deidentifier
 ```
 
-The container processes every `.dcm` file found under `/app/data` (recursively) and writes results to `/app/output`, in the same layout described above. OCR/NLP model weights are baked into the image at build time, so the container needs no outbound network access at runtime — this matters for air-gapped/TEE deployments.
+The container processes every `.dcm` file located in `/app/data` and saves anonymized outputs and logs to `/app/output`. Model weights are embedded into the image during `docker build`, enabling fully offline, air-gapped deployment in secure clinical environments.
 
-Environment variables (already set in the image, override if needed):
+---
+
+## Environment Variables
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `SKALD_DATA_DIR` | `/app/data` | Input DICOM files (recursively scanned for `*.dcm`) |
-| `SKALD_CONFIG_DIR` | `/app/config` | Reserved for future run-time config overrides |
-| `SKALD_OUTPUT_DIR` | `/app/output` | Per-file results, audit logs, and the persistent keystore |
-
-## Testing
-
-```bash
-pytest
-```
-
-## Policy notes
-
-- Tag values are never modified by the pixel pipeline — only private/vendor tags are stripped and UIDs regenerated, so a file can't be linked back to the original study before tag-level de-identification runs.
-- The tag-level de-identification technique per field is explicit and auditable in `tag_mapping.py` — nothing is inferred at runtime.
-- `app/de_identification/keystore/` (tokenisation/encryption key material) is never committed to git — it's runtime state, mounted or persisted via `/app/output` in the container.
+| `SKALD_DATA_DIR` | `/app/data` | Input directory containing DICOM files (`*.dcm`) |
+| `SKALD_CONFIG_DIR` | `/app/config` | Configuration directory |
+| `SKALD_OUTPUT_DIR` | `/app/output` | Destination for anonymized files, audit logs, and keys |

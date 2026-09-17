@@ -20,10 +20,31 @@ def _iou(a, b):
     return inter / union if union > 0 else 0.0
 
 
+def _is_pure_clinical_fast(text):
+    val = text.strip().upper()
+    if not val:
+        return True
+    if re.match(r'^(?:L|R|LT|RT|LA|RA|LP|RP|PA|AP|LL|RL|A|P)\s*\d{0,3}$', val):
+        return True
+    if val in CLINICAL_ALLOWLIST or val in {"L26", "R26", "L1", "R1", "L2", "R2", "CXR"}:
+        return True
+    tokens = re.findall(r'[A-Z0-9]+', val)
+    if tokens:
+        expanded_safe = CLINICAL_ALLOWLIST.union({
+            "ANTEROPOSTERIOR", "POSTEROANTERIOR", "ANIIEROPOSTERIOR", "ANIIEROPAOSIIERIORR",
+            "PROJECTION", "ANTERIOR", "POSTERIOR", "ERECT", "SUPINE", "CHEST", "PORTABLE",
+            "L26", "R26", "L12", "R12", "CXR"
+        })
+        if all(t in expanded_safe or re.match(r'^(?:L|R|C|T|S)\d{1,2}$', t) for t in tokens):
+            return True
+    return False
+
+
 def merge_horizontal_lines(detections, max_gap_factor=2.5, min_v_overlap=0.45):
     """
     Merges detections that are on the same horizontal line and close to each other.
-    Allows catching labeled PII like 'PATIENT:' + 'MEERA IYER' as a single entity.
+    Allows catching labeled PII like 'PATIENT:' + 'MEERA IYER' as a single entity,
+    while keeping pure clinical terms (e.g. 'CXR', 'L26') separate so they remain preserved.
     """
     if not detections:
         return []
@@ -39,6 +60,13 @@ def merge_horizontal_lines(detections, max_gap_factor=2.5, min_v_overlap=0.45):
                 box1 = sorted_det[i]["bbox"]
                 box2 = sorted_det[j]["bbox"]
                 
+                # Do not merge if one box is pure clinical text (e.g. 'CXR', 'L26') and the other is not
+                is_clin1 = _is_pure_clinical_fast(sorted_det[i]["text"])
+                is_clin2 = _is_pure_clinical_fast(sorted_det[j]["text"])
+                if is_clin1 != is_clin2:
+                    j += 1
+                    continue
+
                 h1 = box1[3] - box1[1]
                 h2 = box2[3] - box2[1]
                 min_h = min(h1, h2)
@@ -73,8 +101,28 @@ def merge_horizontal_lines(detections, max_gap_factor=2.5, min_v_overlap=0.45):
     return sorted_det
 
 
+
+def _containment(a, b):
+    """Returns fraction of box `a` that is contained inside box `b`."""
+    xA = max(a[0], b[0]); yA = max(a[1], b[1])
+    xB = min(a[2], b[2]); yB = min(a[3], b[3])
+    inter = max(0, xB - xA) * max(0, yB - yA)
+    areaA = max(1, (a[2]-a[0]) * (a[3]-a[1]))
+    return inter / float(areaA)
+
+
+def _should_merge(box_a, box_b, iou_thresh=0.3):
+    """Merge if IoU > threshold OR if one box contains >70% of the other."""
+    if _iou(box_a, box_b) > iou_thresh:
+        return True
+    if _containment(box_a, box_b) > 0.70 or _containment(box_b, box_a) > 0.70:
+        return True
+    return False
+
+
 def merge_detections(raw, iou_thresh=0.3):
-    """NMS-style merge of overlapping boxes from all OCR engine+variant passes."""
+    """NMS-style merge of overlapping boxes from all OCR engine+variant passes.
+    Uses both IoU and containment checks to catch near-duplicate bboxes."""
     if not raw:
         return []
     sorted_det = sorted(raw, key=lambda x: x["confidence"], reverse=True)
@@ -84,7 +132,7 @@ def merge_detections(raw, iou_thresh=0.3):
         group = [cur]
         remaining = []
         for d in sorted_det:
-            if _iou(cur["bbox"], d["bbox"]) > iou_thresh:
+            if _should_merge(cur["bbox"], d["bbox"], iou_thresh):
                 group.append(d)
             else:
                 remaining.append(d)
@@ -98,26 +146,104 @@ def merge_detections(raw, iou_thresh=0.3):
                      int(bboxes[:,2].max()), int(bboxes[:,3].max())],
             "confidence": min(1.0, max_conf),
         })
-    merged = merge_horizontal_lines(merged)
-    return merged
+
+    # Post-merge dedup: remove any remaining near-duplicate boxes
+    deduped = []
+    for det in merged:
+        is_dup = False
+        for existing in deduped:
+            if _containment(det["bbox"], existing["bbox"]) > 0.80:
+                # det is mostly inside existing — skip it, but widen existing
+                existing["bbox"][0] = min(existing["bbox"][0], det["bbox"][0])
+                existing["bbox"][1] = min(existing["bbox"][1], det["bbox"][1])
+                existing["bbox"][2] = max(existing["bbox"][2], det["bbox"][2])
+                existing["bbox"][3] = max(existing["bbox"][3], det["bbox"][3])
+                if len(det["text"]) > len(existing["text"]):
+                    existing["text"] = det["text"]
+                is_dup = True
+                break
+        if not is_dup:
+            deduped.append(det)
+
+    deduped = merge_horizontal_lines(deduped)
+    return deduped
+
+
+
+
+def expand_phi_blocks(merged, phi_regions, image_shape):
+    """
+    Groups `merged` detections into vertically-stacked text blocks (adjacent
+    lines, overlapping horizontally -- e.g. a burned-in "Name:" / "ID:" /
+    "Date:" header) and, if any line in a block was classified as PHI,
+    redacts the rest of that block too (unless the sibling line is a confirmed
+    clinical term).
+    """
+    if not merged:
+        return phi_regions
+
+    h, w = image_shape[:2]
+    boxes = [d["bbox"] for d in merged]
+    order = sorted(range(len(boxes)), key=lambda i: boxes[i][1])
+
+    clusters = []
+    current = [order[0]]
+    for idx in order[1:]:
+        prev_box, box = boxes[current[-1]], boxes[idx]
+        prev_h = prev_box[3] - prev_box[1]
+        gap = box[1] - prev_box[3]
+        x_overlap = max(0, min(prev_box[2], box[2]) - max(prev_box[0], box[0]))
+        min_w = min(prev_box[2] - prev_box[0], box[2] - box[0])
+        overlap_ratio = x_overlap / min_w if min_w > 0 else 0
+        if gap <= 1.8 * max(prev_h, 1) and overlap_ratio >= 0.3:
+            current.append(idx)
+        else:
+            clusters.append(current)
+            current = [idx]
+    clusters.append(current)
+
+    phi_bboxes = {tuple(r["bbox"]) for r in phi_regions}
+    added = 0
+    for cluster in clusters:
+        if len(cluster) < 2:
+            continue
+        cluster_bboxes = [tuple(boxes[i]) for i in cluster]
+        has_phi = any(b in phi_bboxes for b in cluster_bboxes)
+        all_phi = all(b in phi_bboxes for b in cluster_bboxes)
+        if has_phi and not all_phi:
+            for i in cluster:
+                b = tuple(boxes[i])
+                if b not in phi_bboxes:
+                    sibling_text = merged[i]["text"]
+                    if _is_clinical(sibling_text):
+                        log.info(f"    KEEP-SIBLING (block_expand_override): '{sibling_text}' @ {list(b)}")
+                        continue
+                    log.info(f"    REDACT (block_expand): '{sibling_text}' @ {list(b)}")
+                    phi_regions.append({"text": sibling_text, "bbox": list(b)})
+                    phi_bboxes.add(b)
+                    added += 1
+    if added:
+        log.info(f"    Block-expand: redacting {added} additional sibling line(s) in flagged text blocks")
+    return phi_regions
 
 
 def _is_clinical(text):
     val = text.strip().upper()
-    if re.match(r'^(?:L|R|LT|RT|LA|RA|LP|RP|PA|AP|LL|RL|A|P)\s*\d*$', val):
+    if re.match(r'^(?:L|R|LT|RT|LA|RA|LP|RP|PA|AP|LL|RL|A|P)\s*\d{0,3}$', val):
         return True
         
-    clean = re.sub(r'[^A-Z]', '', val)
-    if clean in CLINICAL_ALLOWLIST:
+    clean = re.sub(r'[^A-Z0-9]', '', val)
+    if clean in CLINICAL_ALLOWLIST or clean in {"L26", "R26", "L1", "R1", "L2", "R2", "L3", "R3"}:
         return True
 
     tokens = re.findall(r'[A-Z0-9]+', val)
     if tokens:
         expanded_safe = CLINICAL_ALLOWLIST.union({
             "ANTEROPOSTERIOR", "POSTEROANTERIOR", "ANIIEROPOSTERIOR", "ANIIEROPAOSIIERIORR",
-            "PROJECTION", "ANTERIOR", "POSTERIOR", "ERECT", "SUPINE", "CHEST", "PORTABLE"
+            "PROJECTION", "ANTERIOR", "POSTERIOR", "ERECT", "SUPINE", "CHEST", "PORTABLE",
+            "L26", "R26", "L12", "R12"
         })
-        if all(t in expanded_safe for t in tokens):
+        if all(t in expanded_safe or re.match(r'^(?:L|R|C|T|S)\d{1,2}$', t) for t in tokens):
             return True
         
     return False
@@ -126,28 +252,7 @@ def _is_clinical(text):
 def classify_phi(merged, image_shape, analyzer=None, gliner_model=None, medical_ner=None, deid_model=None):
     """
     Classifies each merged detection as PHI (redact) or safe (keep).
-    Uses a 3-Step Hybrid Priority Stack followed by medical protection and spatial fallback:
-
-    Top Priority — 3-Step Hybrid PII/PHI Classification:
-      Step 1: Stanford De-ID Model (StanfordAIMI/stanford-deidentifier-base)
-              Radiology-native transformer — detects PATIENT, NAME, DATE, ID, LOCATION, AGE, PHONE, etc.
-      Step 2: Regex Pattern Matching
-              Deterministic patterns for Aadhaar, ABHA, phone, UHID, MRN, date formats, age/sex, demographic labels.
-      Step 3: Hybrid Combined Decision
-              If BOTH model AND regex agree → high confidence.
-              If EITHER flags PHI → redact (safety-first).
-
-    Phase 2: Medical Entity Preservation
-      - d4data/biomedical-ner-all (supervised)
-      - GLiNER-BioMed Large (zero-shot, radiology-specific labels)
-      - Presidio cross-check to prevent medical NER from shielding real PHI
-
-    Phase 3: Exposure / Number Guard
-      - Pure numeric values (e.g. 120, 80.5) kept as scan parameters.
-
-    Phase 4: Spatial / Default Fallback
-      - Unclassified text in border zones → redact.
-      - Unclassified text in anatomy zone → keep.
+    Uses a 3-Step Hybrid Medical Preservation Stack alongside Stanford De-ID & PII models.
     """
     h, w = image_shape[:2]
     phi_regions = []
@@ -177,7 +282,7 @@ def classify_phi(merged, image_shape, analyzer=None, gliner_model=None, medical_
             "CARDIOMEGALY", "PNEUMONIA", "OPACITY", "OPACITIES", "CARDIAC", "AORTIC",
             "SIEMENS", "PHILIPS", "GE", "HEALTHCARE", "MEDICAL", "SYSTEMS", "MICRODICOM",
             "ANTEROPOSTERIOR", "POSTEROANTERIOR", "ANIIEROPOSTERIOR", "ANIIEROPAOSIIERIORR",
-            "PROJECTION", "ANTERIOR", "POSTERIOR"
+            "PROJECTION", "ANTERIOR", "POSTERIOR", "L26", "R26"
         }
 
         for token in tokens:
@@ -206,80 +311,59 @@ def classify_phi(merged, image_shape, analyzer=None, gliner_model=None, medical_
         if not clean_text:
             continue
 
-        is_phi = False
-        reason = []
-        classified = False
         val_upper = clean_text.upper()
+        reason = []
 
-        # ── Step 1: Stanford De-ID Model (Radiology-Native) ──────────────────
-        model_flags_phi = False
-        model_phi_labels = []
+        # ── 1. PARALLEL SIGNAL GATHERING (Run All Models Simultaneously) ──────
+
+        # Signal A: Clinical Allowlist & Shorthand (e.g. L26, R12, CHEST, AP)
+        is_clinical_allowlist = _is_clinical(clean_text) or _is_text_pure_clinical(clean_text)
+
+        # Signal B: Stanford De-ID Model (Radiology-Native PHI)
+        deid_phi_labels = []
         if deid_model:
             try:
-                deid_entities = deid_model(clean_text)
-                for ent in deid_entities:
+                entities = deid_model(clean_text)
+                for ent in entities:
                     score = float(ent.get("score", 0.0))
                     raw_group = str(ent.get("entity_group") or ent.get("entity") or "").strip()
                     clean_group = re.sub(r'^[BILOU]-', '', raw_group, flags=re.IGNORECASE)
                     if score > 0.30 and clean_group and clean_group.upper() not in {"O", "OUTSIDE"}:
                         if clean_group.upper() in {"UNIQUE_ID", "ID", "MEDICAL_RECORD_NUMBER", "SSN", "PHONE"} and not re.search(r'\d', clean_text):
                             continue
-                        model_flags_phi = True
-                        model_phi_labels.append(clean_group)
+                        deid_phi_labels.append(clean_group)
             except Exception as e:
-                log.debug(f"Stanford De-ID model classification error: {e}")
+                log.debug(f"Stanford De-ID model error: {e}")
 
-        # ── Step 2: Regex Pattern Matching ──────────────────────────────────
-        regex_flags_phi = False
+        # Signal C: Regex PII Patterns & Demographic Labels
         regex_reasons = []
-
         generic_demographic_labels = [
-            "NAME", "PATIENT", "DOB", "D0B", "0B:", "BIRTH", "MRN", "UHID", "PID", "AGE", "SEX", "GENDER",
+            "NAME", "PATIENT", "DATE", "DOB", "D0B", "0B:", "BIRTH", "MRN", "UHID", "PID", "AGE", "SEX", "GENDER",
             "MALE", "FEMALE", "DR.", "DOCTOR", "PHYSICIAN", "HOSPITAL", "HOSP", "CLINIC", "INSTITUT",
             "CONFIDENTIAL", "CONFIDCNTTIAC", "RESTRICTED", "PROPRIETARY", "SECRET"
         ]
         has_id_label = bool(re.search(r'\bID\b', val_upper))
         has_demographic_label = any(label in val_upper for label in generic_demographic_labels) or has_id_label
         if has_demographic_label:
-            regex_flags_phi = True
             regex_reasons.append("regex:demographic_label")
-
         for pat_name, pat_regex in PII_PATTERNS.items():
             if re.search(pat_regex, clean_text, re.IGNORECASE):
-                regex_flags_phi = True
                 regex_reasons.append(f"regex:pii_pattern_{pat_name}")
                 break
 
-        # ── Step 3: Combined Decision ────────────────────────────────────────
-        if model_flags_phi and regex_flags_phi:
-            is_phi = True
-            reason.append(f"hybrid:model+regex_agree(model={','.join(model_phi_labels)}, {', '.join(regex_reasons)})")
-            classified = True
-        elif regex_flags_phi:
-            is_phi = True
-            reason.extend(regex_reasons)
-            classified = True
-        elif model_flags_phi:
-            if _is_clinical(clean_text) or _is_text_pure_clinical(clean_text):
-                reason.append(f"hybrid:model_flagged({','.join(model_phi_labels)})_but_clinical_override")
-            else:
-                is_phi = True
-                reason.append(f"hybrid:model_only({','.join(model_phi_labels)})")
-                classified = True
-
-        # ── Presidio Analyzer Check (if active) ──────────────────────────────
-        if not classified and analyzer:
+        # Signal D: Presidio NLP Analyzer
+        presidio_flagged = False
+        if analyzer:
             try:
                 results = analyzer.analyze(text=clean_text, language="en")
                 if any(r.entity_type in {"PERSON", "DATE_TIME", "LOCATION", "EMAIL_ADDRESS", "PHONE_NUMBER"} and r.score > 0.40 for r in results):
-                    is_phi = True
-                    classified = True
-                    reason.append("presidio_nlp")
+                    presidio_flagged = True
             except Exception:
                 pass
 
-        # ── Phase 2: Medical Entity Preservation (d4data + GLiNER-BioMed) ────
-        if not classified and medical_ner:
+        # Signal E: Supervised Biomedical NER (d4data/biomedical-ner-all)
+        med_ner_labels = []
+        if medical_ner:
             try:
                 entities = medical_ner(clean_text)
                 for ent in entities:
@@ -289,17 +373,17 @@ def classify_phi(merged, image_shape, analyzer=None, gliner_model=None, medical_
                         "Sign_symptom", "Lab_value", "Medication",
                         "Biological_structure", "Therapeutic_procedure"
                     }:
-                        is_phi = False
-                        classified = True
-                        reason.append(f"medical_ner:{ent_group}")
-                        break
+                        med_ner_labels.append(ent_group)
             except Exception as e:
                 log.debug(f"Medical NER prediction failed: {e}")
 
-        if not classified and gliner_model:
+        # Signal F: GLiNER-BioMed Zero-Shot Model
+        gliner_labels = []
+        if gliner_model:
             try:
                 labels = [
-                    "thoracic anatomy", "chest anatomy", "body part", "organ",
+                    "radiology marker", "laterality code", "anatomical position shorthand", "rib marker",
+                    "radiological code", "thoracic anatomy", "chest anatomy", "body part", "organ",
                     "cardiac structure", "pulmonary structure", "skeletal structure",
                     "lung pathology", "cardiac finding", "disease", "medical condition",
                     "clinical finding", "radiological finding", "medical procedure",
@@ -308,42 +392,62 @@ def classify_phi(merged, image_shape, analyzer=None, gliner_model=None, medical_
                     "imaging modality", "medication", "drug name", "vital sign", "lab value",
                     "measurement", "anatomical direction", "laterality marker",
                 ]
-                entities = gliner_model.predict_entities(clean_text, labels, threshold=0.35)
+                thresh = 0.20 if len(clean_text) <= 5 else 0.35
+                entities = gliner_model.predict_entities(clean_text, labels, threshold=thresh)
                 for ent in entities:
                     if ent["label"] in labels:
-                        is_phi = False
-                        classified = True
-                        reason.append(f"gliner_biomed:{ent['label']}")
-                        break
+                        gliner_labels.append(ent["label"])
             except Exception as e:
                 log.debug(f"GLiNER-BioMed clinical check failed: {e}")
 
-        # ── Phase 3: Exposure / Number Guard ─────────────────────────────────
-        if not classified:
-            if re.match(r'^\d{1,4}(?:\.\d+)?(?:\s*-\s*\d{1,4}(?:\.\d+)?)?$', clean_text):
-                is_phi = False
-                classified = True
-                reason.append("clinical:exposure_number")
+        # ── 2. SIMULTANEOUS MATRIX RESOLUTION ─────────────────────────────────
 
-        # ── Phase 4: Spatial / Default Fallback ──────────────────────────────
-        if not classified:
-            y_mid = (bbox[1] + bbox[3]) / 2.0
-            x_mid = (bbox[0] + bbox[2]) / 2.0
-            in_border = (
-                y_mid < h * 0.25 or y_mid > h * 0.75 or
-                x_mid < w * 0.15 or x_mid > w * 0.85
-            )
-            if in_border and re.search(r'[A-Za-z]', clean_text):
+        phi_signal = bool(deid_phi_labels or regex_reasons or presidio_flagged)
+        medical_signal = bool(med_ner_labels or gliner_labels)
+
+        # Condition 1: Clinical Allowlist / Shorthand (Always KEPT)
+        if is_clinical_allowlist:
+            is_phi = False
+            reason.append("clinical:allowlist")
+
+        # Condition 2: Simultaneous PHI & Medical Signals present
+        elif phi_signal and medical_signal:
+            # Check if string carries explicit demographic / PII tokens
+            if has_demographic_label or deid_phi_labels or presidio_flagged:
                 is_phi = True
-                reason.append("fallback:suspect_border")
+                reason.append(f"simultaneous_matrix:phi_overrides_medical(phi={','.join(deid_phi_labels + regex_reasons)}, med={','.join(med_ner_labels + gliner_labels)})")
             else:
                 is_phi = False
-                reason.append("fallback:safe_anatomy")
+                reason.append(f"simultaneous_matrix:medical_preserved({','.join(med_ner_labels + gliner_labels)})")
+
+        # Condition 3: Pure PHI Signal (No Medical Signal)
+        elif phi_signal:
+            is_phi = True
+            reasons_combined = deid_phi_labels + regex_reasons + (["presidio"] if presidio_flagged else [])
+            reason.append(f"simultaneous_matrix:phi_detected({','.join(reasons_combined)})")
+
+        # Condition 4: Pure Medical Signal (No PHI Signal)
+        elif medical_signal:
+            is_phi = False
+            reason.append(f"simultaneous_matrix:medical_entity_preserved({','.join(med_ner_labels + gliner_labels)})")
+
+        # Condition 5: Exposure Number Guard
+        elif re.match(r'^\d{1,4}(?:\.\d+)?(?:\s*-\s*\d{1,4}(?:\.\d+)?)?$', clean_text):
+            is_phi = False
+            reason.append("clinical:exposure_number")
+
+        # Condition 6: Default Fallback
+        else:
+            if re.search(r'[A-Za-z]', clean_text):
+                is_phi = True
+                reason.append("fallback:unclassified_text")
+            else:
+                is_phi = False
+                reason.append("fallback:numeric_non_phi")
 
         if is_phi:
-            zone = "border" if (bbox[1] + bbox[3])/2.0 < h * 0.25 or (bbox[1] + bbox[3])/2.0 > h * 0.75 or (bbox[0] + bbox[2])/2.0 < w * 0.15 or (bbox[0] + bbox[2])/2.0 > w * 0.85 else "anatomy"
-            log.info(f"    REDACT-{zone.upper()} ({', '.join(reason)}): '{text}' @ {bbox}")
-            phi_regions.append({"text": text, "bbox": bbox, "zone": zone})
+            log.info(f"    REDACT ({', '.join(reason)}): '{text}' @ {bbox}")
+            phi_regions.append({"text": text, "bbox": bbox})
         else:
             log.info(f"    KEEP ({', '.join(reason) if reason else 'unclassified'}): '{text}' @ {bbox}")
 

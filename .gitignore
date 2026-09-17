@@ -23,6 +23,7 @@ app/data/*
 app/config/*
 !app/config/.gitkeep
 app/output/
+*secured.json
 
 # Raw sample dataset — real patient DICOM files, never commit
 raw_telanagana_dicom_dataset/

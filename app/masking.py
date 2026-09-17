@@ -4,7 +4,7 @@ masking.py — Stage 5: character-level stroke isolation & Navier-Stokes pixel r
 Features:
   - VOI LUT & Inverse VOI LUT mapping for exact 16-bit / 8-bit visual reconstruction
   - Tri-Signal Character Stroke Segmentation (Top-Hat + Contrast Thresholding + Ellipse Dilation)
-  - Two-Pass Iterative Neighbor Inpainting (structure-preserving, no quality loss to underlying anatomy)
+  - Unified Neighbor Inpainting (structure-preserving, no quality loss to underlying anatomy)
 """
 
 import numpy as np
@@ -77,14 +77,15 @@ def _apply_inverse_voi_lut(visual_pixels, ds, original_raw_pixels):
     return raw.astype(original_raw_pixels.dtype)
 
 
-def _get_character_mask(roi_8bit, bbox_local=None, dilation_px=3):
+def _get_character_mask(roi_8bit, bbox_local=None, dilation_px=2):
     """
     Tri-Signal Character Stroke Segmentation.
     Combines:
-      1. Top-Hat High-Pass (bright text on dark background)
+      1. Top-Hat High-Pass (bright text cores)
       2. Local Relative Contrast Thresholding
-      3. Anti-Aliased Ellipse Dilation
-    Captures character strokes of ANY polarity in a unified mask.
+      3. Drop-Shadow / Dark Outline Capture (for stroked clinical fonts)
+      4. Anti-Aliased Ellipse Dilation
+    Captures complete glyphs without capturing background tissue or anatomy.
     """
     h, w = roi_8bit.shape[:2]
 
@@ -109,19 +110,34 @@ def _get_character_mask(roi_8bit, bbox_local=None, dilation_px=3):
     k_size = max(5, min(15, (crop_h // 2) | 1))
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k_size, k_size))
     tophat = cv2.morphologyEx(denoised, cv2.MORPH_TOPHAT, kernel)
-    _, mask_bright = cv2.threshold(tophat, 8, 255, cv2.THRESH_BINARY)
+    _, mask_bright = cv2.threshold(tophat, 10, 255, cv2.THRESH_BINARY)
 
     bg_med = float(np.median(crop))
     crop_max = float(np.max(crop))
-    if crop_max > bg_med + 10.0:
-        t_contrast = bg_med + 0.20 * (crop_max - bg_med)
+    if crop_max > bg_med + 12.0:
+        t_contrast = bg_med + 0.25 * (crop_max - bg_med)
         _, mask_contrast = cv2.threshold(crop, min(245.0, t_contrast), 255, cv2.THRESH_BINARY)
     else:
         mask_contrast = np.zeros_like(crop)
 
     stroke_union = cv2.bitwise_or(mask_bright, mask_contrast)
 
-    k_dil_size = max(5, min(9, dilation_px * 2 + 1))
+    # ── Shadow / Dark Outline Capture ────────────────────────────────────────
+    # Medical burned-in text commonly features an anti-aliased black border/outline
+    # (near 0) around white characters. Including it in the mask prevents Navier-Stokes
+    # from propagating dark border pixels into the character center.
+    k_near = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    stroke_dil_near = cv2.dilate(stroke_union, k_near)
+    shadow_thresh = min(30, max(5, int(bg_med * 0.4)))
+    mask_shadow = (crop < shadow_thresh) & (stroke_dil_near > 0)
+    stroke_union = cv2.bitwise_or(stroke_union, (mask_shadow.astype(np.uint8) * 255))
+
+    # Morphological closing to seal pinhole gaps between strokes & shadow
+    k_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    stroke_union = cv2.morphologyEx(stroke_union, cv2.MORPH_CLOSE, k_close)
+
+    # Elliptical dilation covers anti-aliasing without blurring adjacent letters
+    k_dil_size = max(3, min(5, dilation_px * 2 + 1))
     k_dil = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_dil_size, k_dil_size))
     dilated = cv2.dilate(stroke_union, k_dil, iterations=1)
 
@@ -148,30 +164,16 @@ def _inpaint_16bit(image_16, mask_8, radius=9, method=cv2.INPAINT_NS):
     return result
 
 
-def _redact_border_zone(cleaned, x1, y1, x2, y2):
-    """Border zone strategy: background median fill."""
-    h, w = cleaned.shape[:2]
-    pad = 20
-    ctx = cleaned[
-        max(0, y1 - pad):min(h, y2 + pad),
-        max(0, x1 - pad):min(w, x2 + pad)
-    ]
-    fill_val = int(np.median(ctx))
-    cleaned[y1:y2, x1:x2] = fill_val
-    return cleaned
-
-
-def _redact_anatomy_zone(cleaned, x1, y1, x2, y2):
+def redact_roi(cleaned, x1, y1, x2, y2, pad=10):
     """
-    Anatomy zone strategy: Character-level stroke mask + Navier-Stokes inpainting.
-    Reconstructs pixels from immediate real neighbors.
+    Unified character-stroke level inpainting with Navier-Stokes neighbor reconstruction.
+    Applied uniformly to all regions (anatomy and border alike).
     """
     h, w = cleaned.shape[:2]
-    pad = 6
     rx1, rx2 = max(0, x1 - pad), min(w, x2 + pad)
     ry1, ry2 = max(0, y1 - pad), min(h, y2 + pad)
 
-    roi = cleaned[ry1:ry2, rx1:rx2]
+    roi = cleaned[ry1:ry2, rx1:rx2].copy()
     roi_h, roi_w = roi.shape[:2]
     if roi_h < 3 or roi_w < 3:
         return cleaned
@@ -182,8 +184,13 @@ def _redact_anatomy_zone(cleaned, x1, y1, x2, y2):
     else:
         roi_8 = roi.astype(np.uint8)
 
-    bbox_local = (pad, pad, pad + (x2 - x1), pad + (y2 - y1))
-    char_mask = _get_character_mask(roi_8, bbox_local=bbox_local, dilation_px=3)
+    iy1 = y1 - ry1
+    iy2 = y2 - ry1
+    ix1 = x1 - rx1
+    ix2 = x2 - rx1
+
+    bbox_local = (ix1, iy1, ix2, iy2)
+    char_mask = _get_character_mask(roi_8, bbox_local=bbox_local, dilation_px=2)
     crop_mask = char_mask[0:roi_h, 0:roi_w]
 
     if not np.any(crop_mask > 0):
@@ -192,17 +199,64 @@ def _redact_anatomy_zone(cleaned, x1, y1, x2, y2):
         return cleaned
 
     if roi.dtype != np.uint8:
-        roi_inpainted = _inpaint_16bit(roi, crop_mask, radius=9, method=cv2.INPAINT_NS)
+        roi_inpainted = _inpaint_16bit(roi, crop_mask, radius=7, method=cv2.INPAINT_NS)
     else:
-        roi_inpainted = cv2.inpaint(roi, crop_mask, 9, cv2.INPAINT_NS)
+        roi_inpainted = cv2.inpaint(roi, crop_mask, 7, cv2.INPAINT_NS)
 
     cleaned[ry1:ry2, rx1:rx2] = roi_inpainted
     return cleaned
 
 
+# Unified aliases
+_redact_border_zone = redact_roi
+_redact_anatomy_zone = redact_roi
+
+
+def _cluster_bboxes(regions, margin=8):
+    """
+    Clusters overlapping or closely adjacent bounding boxes into unified blocks.
+    Prevents neighboring lines of text from leaking into each other's padding.
+    """
+    if not regions:
+        return []
+
+    boxes = [list(r["bbox"]) for r in regions]
+
+    merged = True
+    while merged:
+        merged = False
+        new_boxes = []
+        visited = [False] * len(boxes)
+        for i in range(len(boxes)):
+            if visited[i]:
+                continue
+            b1 = list(boxes[i])
+            visited[i] = True
+            for j in range(i + 1, len(boxes)):
+                if visited[j]:
+                    continue
+                b2 = boxes[j]
+                e1 = [b1[0] - margin, b1[1] - margin, b1[2] + margin, b1[3] + margin]
+                if (max(e1[0], b2[0]) < min(e1[2], b2[2]) and
+                        max(e1[1], b2[1]) < min(e1[3], b2[3])):
+                    b1 = [
+                        min(b1[0], b2[0]),
+                        min(b1[1], b2[1]),
+                        max(b1[2], b2[2]),
+                        max(b1[3], b2[3])
+                    ]
+                    visited[j] = True
+                    merged = True
+            new_boxes.append(b1)
+        boxes = new_boxes
+
+    return [{"bbox": b} for b in boxes]
+
+
 def redact_pixels(image_array, phi_regions, ds=None):
     """
-    Character-stroke level pixel redaction with Navier-Stokes neighbor propagation.
+    Unified character-stroke level pixel redaction with Navier-Stokes neighbor propagation.
+    Applies structure-preserving reconstruction across ALL regions uniformly.
 
     Works on native 8-bit OR 16-bit pixel arrays without losing dynamic range.
     Returns (cleaned_array, combined_mask).
@@ -215,31 +269,32 @@ def redact_pixels(image_array, phi_regions, ds=None):
     h, w = cleaned.shape[:2]
     combined_mask = np.zeros((h, w), dtype=np.uint8)
 
-    border_count = 0
-    anatomy_count = 0
-
+    # Mark all individual region bboxes in the audit mask
     for region in phi_regions:
         x1, y1, x2, y2 = region["bbox"]
+        x1, y1 = max(0, x1), max(0, y1)
+        x2, y2 = min(w, x2), min(h, y2)
+        if (x2 - x1) > 0 and (y2 - y1) > 0:
+            combined_mask[y1:y2, x1:x2] = 255
+
+    # Cluster overlapping/adjacent bboxes into unified blocks
+    clusters = _cluster_bboxes(phi_regions, margin=8)
+    log.info(f"  [Stage 5] Unified inpainting for {len(clusters)} region block(s)...")
+
+    redact_count = 0
+    for cluster in clusters:
+        x1, y1, x2, y2 = cluster["bbox"]
         x1, y1 = max(0, x1), max(0, y1)
         x2, y2 = min(w, x2), min(h, y2)
         if (x2 - x1) <= 0 or (y2 - y1) <= 0:
             continue
 
-        zone = region.get("zone", "border")
-        combined_mask[y1:y2, x1:x2] = 255
-
-        if zone == "border":
-            cleaned = _redact_border_zone(cleaned, x1, y1, x2, y2)
-            border_count += 1
-            log.info(f"  [Stage 5] Border fill applied @ [{x1},{y1},{x2},{y2}]")
-        else:
-            cleaned = _redact_anatomy_zone(cleaned, x1, y1, x2, y2)
-            anatomy_count += 1
-            log.info(f"  [Stage 5] Character stroke inpainting @ [{x1},{y1},{x2},{y2}]")
+        cleaned = redact_roi(cleaned, x1, y1, x2, y2)
+        redact_count += 1
+        log.info(f"  [Stage 5] Unified character stroke inpainting @ [{x1},{y1},{x2},{y2}]")
 
     log.info(
-        f"  [Stage 5] Done. Border fills: {border_count} | "
-        f"Anatomy inpainting: {anatomy_count} | "
+        f"  [Stage 5] Done. Total blocks redacted: {redact_count} | "
         f"Total pixels masked: {int(np.sum(combined_mask > 0))}"
     )
     return cleaned, combined_mask
