@@ -179,13 +179,15 @@ def _apply_to_value(tag_action, raw_value, elem, tag_id, keystore, secrets):
     there were three real ones."""
     if isinstance(raw_value, (list, MultiValue)):
         out = []
+        changed = False
         for item in raw_value:
             text = str(item).strip()
             if should_skip_value(text):
                 out.append(item)
-            else:
-                out.append(apply_action(tag_action, text, elem, tag_id, keystore, secrets))
-        return out, True
+                continue
+            out.append(apply_action(tag_action, text, elem, tag_id, keystore, secrets))
+            changed = True
+        return out, changed
 
     text = str(raw_value).strip() if raw_value is not None else ""
     if should_skip_value(text):
