@@ -1,0 +1,23 @@
+{
+  "pipeline": {
+    "enable_tag_deidentification": true,
+    "enable_burned_in_text_redaction": true,
+    "ocr_engine": "paddleocr",
+    "verification_level": "two_tier"
+  },
+  "storage": {
+    "data_dir": "/app/data",
+    "config_dir": "/app/config",
+    "output_dir": "/app/output",
+    "keystore_file": "secured.json"
+  },
+  "redaction": {
+    "inpaint_method": "navier_stokes",
+    "inpaint_radius": 3,
+    "stroke_dilation": 2
+  },
+  "classification": {
+    "phi_threshold": 0.5,
+    "clinical_allowlist_enabled": true
+  }
+}
