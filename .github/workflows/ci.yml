@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main, comparison-for-skald-only-paddle]
+  pull_request:
+    branches: [main, comparison-for-skald-only-paddle]
+
+jobs:
+  lint:
+    name: Lint & Style Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Install Linting Tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install ruff
+      - name: Run Ruff Linter
+        run: ruff check app/ tests/
+
+  test:
+    name: Unit Tests & Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Install Test Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest pytest-cov pydicom numpy pycryptodome
+      - name: Run Tests
+        env:
+          PYTHONPATH: app
+        run: |
+          pytest tests/ -v --cov=app --cov-report=term-missing
+
+  docker-syntax:
+    name: Dockerfile Syntax Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Check Dockerfile syntax
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          tags: dicom-deidentifier:test-syntax

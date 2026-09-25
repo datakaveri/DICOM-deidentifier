@@ -49,6 +49,13 @@ cd app
 python main.py
 ```
 
+### Running Tests
+
+```bash
+# Execute unit test suite with coverage
+pytest tests/ -v
+```
+
 ### Outputs Generated (per DICOM file)
 Under `app/output/<sample_name>/`:
 - `after_deidentification.dcm` — Final anonymized DICOM (pixel-redacted + tag de-identified).
