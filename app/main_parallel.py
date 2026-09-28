@@ -1,16 +1,34 @@
 """
 main_parallel.py — High-throughput parallel DICOM de-identification batch runner.
-Optimized for multi-core VMs (e.g. 16 CPU Cores / 125 GB RAM).
+Optimized for multi-core compute environments (e.g. 16 CPU Cores / 125 GB RAM).
 
-Key Features:
-  - Process-level parallelism with persistent worker engines (models loaded once per worker).
-  - Model cache pre-warming: all 5 AI model weights downloaded once in the main process
-    before spawning workers, so workers load from local disk cache (60-80% faster init).
-  - PaddleOCR runs on text-region crops only (not full image) — major per-file speedup.
-  - Paddle MKLDNN disabled and internal thread pool capped — fixes VM crashes & thrashing.
-  - forkserver context on Linux (imports happen once, then workers fork from server).
-  - Dynamic worker auto-tuning based on available CPU cores and RAM.
-  - Safe error handling & full audit snapshot generation.
+PIPELINE & MODEL ARCHITECTURE:
+  1. OCR Engine:
+     - PaddleOCR (PP-OCRv6): Fast text detection & recognition on burned-in pixel text.
+       Runs in targeted text-region crops mode for maximum throughput.
+  2. PII / Demographic Classification:
+     - Presidio NLP Analyzer: Detects standard PII entities (PERSON, DATE, LOCATION, etc.).
+     - General NER (dslim/bert-base-NER): Scoped strictly to PER, LOC, ORG at >0.60 confidence
+       to prevent medical terms from false-positive PII flags.
+     - Indian Demographic & Identifier Regex: UHID, MRN, Patient ID, Age/Sex, Dates, Hospital names.
+  3. Medical Entity Preservation Stack:
+     - Signal A: Clinical Allowlist & Fuzzy OCR Normalization: Catches radiology markers
+       (L, R, PA ERECT, CXR, L1-L5, AP, KVP/MAS, NORMAL) and OCR misreads (N0RMAL, ERECI).
+     - Signal E1 (Primary): d4data/biomedical-ner-all: High-confidence medical NER for
+       anatomical structures, disease disorders, signs/symptoms, and qualitative concepts.
+     - Signal E2 (Fallback): Clinical-AI-Apollo/Medical-NER: Secondary clinical transformer
+       invoked automatically if primary NER finds no medical entities.
+  4. Decision Matrix:
+     - Cross-references PII vs Medical signals simultaneously; ensures medical findings
+       and laterality markers are safely preserved while PII is redacted.
+  5. Inpainting & Redaction:
+     - Navier-Stokes mathematical inpainting on MONOCHROME1 and MONOCHROME2 pixel arrays.
+  6. Verification:
+     - Multi-tier verification: Inverted second-pass OCR + tag cross-checking against data.json.
+  7. Process & Parallel Execution:
+     - Model cache pre-warming: AI model weights downloaded once in main process before spawning.
+     - Worker isolation: Persistent in-memory model instances per worker with capped thread count.
+     - Linux forkserver / Windows spawn compatibility with oneDNN/PIR hardening.
 """
 
 # ── 0. Paddle environment hardening (MUST be first) ──────────────────────────
@@ -157,7 +175,8 @@ def process_single_file(input_path):
     if _engines is None:
         init_worker(THREADS_PER_WORKER)
 
-    paddle_ocr, analyzer, deid_model, medical_ner, gliner_model = _engines
+    paddle_ocr, analyzer, deid_model, medical_ner, gliner_model, *extra = _engines
+    fallback_medical_ner = extra[0] if extra else None
     start_time = time.time()
 
     stem = os.path.splitext(os.path.basename(input_path))[0]
@@ -186,7 +205,8 @@ def process_single_file(input_path):
         pipeline_audit = anonymize_dicom_file(
             input_path, before_output, final_output, data_snapshot,
             paddle_ocr, analyzer, _keystore,
-            deid_model=deid_model, medical_ner=medical_ner, gliner_model=gliner_model
+            deid_model=deid_model, medical_ner=medical_ner, gliner_model=gliner_model,
+            fallback_medical_ner=fallback_medical_ner
         )
 
         elapsed_sec = round(time.time() - start_time, 2)

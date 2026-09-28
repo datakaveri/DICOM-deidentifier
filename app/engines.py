@@ -14,11 +14,14 @@ import time
 
 from config import log
 
+import paddle_env  # noqa: F401 — must be first to set MKLDNN and thread env flags
+
 # ─── Optional engine imports ──────────────────────────────────────────────────
 try:
     from paddleocr import PaddleOCR
     PADDLE_AVAILABLE = True
-except Exception:
+except Exception as e:
+    log.warning(f"Failed to import PaddleOCR: {e}")
     PADDLE_AVAILABLE = False
 
 try:
@@ -79,29 +82,24 @@ def initialize_engines(use_gpu=False):
     paddle_ocr = None
     if PADDLE_AVAILABLE:
         try:
-            # Native PaddleOCR v2.x (PP-OCRv4 models)
-            # enable_mkldnn=False prevents segfaults on VMs without AVX2/AVX512.
-            # cpu_threads caps Paddle's internal thread pool per worker.
             paddle_ocr = PaddleOCR(
                 use_angle_cls=False,
                 lang='en',
                 use_gpu=use_gpu,
                 enable_mkldnn=False,
                 cpu_threads=cpu_threads,
-                show_log=False,
             )
+        except Exception as e1:
+            log.info(f"Tuned PaddleOCR init failed ({e1}), falling back to standard init...")
+            try:
+                paddle_ocr = PaddleOCR(use_angle_cls=False, lang='en')
+            except Exception as e2:
+                log.warning(f"PaddleOCR init failed: {e2}")
+                print(f"  [WARN] PaddleOCR init failed: {e2}")
+
+        if paddle_ocr is not None:
             elapsed = round(time.time() - t0, 1)
             print(f"  [OK] PaddleOCR initialized ({elapsed}s)")
-        except Exception as e:
-            log.warning(f"PaddleOCR init failed: {e}")
-            print(f"  [WARN] PaddleOCR init failed: {e}")
-            # Detailed diagnostic for VM debugging
-            try:
-                import paddle
-                print(f"  [DIAG] PaddlePaddle version: {paddle.__version__}")
-                print(f"  [DIAG] Paddle compiled with MKLDNN: {paddle.device.is_compiled_with_mkldnn() if hasattr(paddle.device, 'is_compiled_with_mkldnn') else 'unknown'}")
-            except Exception:
-                pass
 
     analyzer = None
     if PRESIDIO_AVAILABLE:
@@ -115,15 +113,16 @@ def initialize_engines(use_gpu=False):
     if TRANSFORMERS_AVAILABLE:
         try:
             deid_model = tf_pipeline(
-                "token-classification",
-                model="StanfordAIMI/stanford-deidentifier-base",
+                "ner",
+                model="dslim/bert-base-NER",
                 aggregation_strategy="simple"
             )
-            print("  [OK] Stanford De-ID model initialized")
+            print("  [OK] General NER model (dslim/bert-base-NER) initialized")
         except Exception as e:
-            print(f"  [WARN] Stanford De-ID model failed to init: {e}")
+            print(f"  [WARN] General NER model failed to init: {e}")
 
     medical_ner = None
+    fallback_medical_ner = None
     if TRANSFORMERS_AVAILABLE:
         try:
             medical_ner = tf_pipeline(
@@ -131,17 +130,22 @@ def initialize_engines(use_gpu=False):
                 model="d4data/biomedical-ner-all",
                 aggregation_strategy="simple"
             )
-            print("  [OK] Biomedical NER model initialized")
+            print("  [OK] Primary Biomedical NER (d4data/biomedical-ner-all) initialized")
         except Exception as e:
-            print(f"  [WARN] Biomedical NER model failed to init: {e}")
+            print(f"  [WARN] Primary Biomedical NER failed to init: {e}")
 
-    gliner_model = None
-    if GLINER_AVAILABLE:
         try:
-            gliner_model = GLiNER.from_pretrained("urchade/gliner_large-v2.1")
-            print("  [OK] GLiNER-BioMed model initialized")
+            fallback_medical_ner = tf_pipeline(
+                "ner",
+                model="Clinical-AI-Apollo/Medical-NER",
+                aggregation_strategy="simple"
+            )
+            print("  [OK] Fallback Medical NER (Clinical-AI-Apollo/Medical-NER) initialized")
         except Exception as e:
-            print(f"  [WARN] GLiNER model failed to init: {e}")
+            print(f"  [WARN] Fallback Medical NER failed to init: {e}")
+
+    gliner_model = None  # GLiNER disabled: medical preservation handled by BioNER + expanded allowlist
+    print("  [SKIP] GLiNER disabled — medical preservation via BioNER + expanded clinical allowlist")
 
     if not paddle_ocr:
         print("\n[ERROR] No OCR engine available! Run: pip install paddlepaddle paddleocr")
@@ -150,7 +154,7 @@ def initialize_engines(use_gpu=False):
     total_init = round(time.time() - t0, 1)
     print(f"[Worker {worker_pid}] All engines ready in {total_init}s\n")
 
-    return paddle_ocr, analyzer, deid_model, medical_ner, gliner_model
+    return paddle_ocr, analyzer, deid_model, medical_ner, gliner_model, fallback_medical_ner
 
 
 def pre_warm_model_cache(use_gpu=False):
@@ -173,10 +177,13 @@ def pre_warm_model_cache(use_gpu=False):
     # 1. PaddleOCR — downloads PP-OCRv4 models to ~/.paddleocr/
     if PADDLE_AVAILABLE:
         try:
-            _warmup_ocr = PaddleOCR(
-                use_angle_cls=False, lang='en', use_gpu=use_gpu,
-                enable_mkldnn=False, cpu_threads=1, show_log=False,
-            )
+            try:
+                _warmup_ocr = PaddleOCR(
+                    use_angle_cls=False, lang='en', use_gpu=use_gpu,
+                    enable_mkldnn=False, cpu_threads=1,
+                )
+            except Exception:
+                _warmup_ocr = PaddleOCR(use_angle_cls=False, lang='en')
             del _warmup_ocr
             print("  [CACHED] PaddleOCR model weights")
         except Exception as e:
@@ -187,8 +194,9 @@ def pre_warm_model_cache(use_gpu=False):
         try:
             from transformers import AutoTokenizer, AutoModelForTokenClassification
             for model_name in [
-                "StanfordAIMI/stanford-deidentifier-base",
+                "dslim/bert-base-NER",
                 "d4data/biomedical-ner-all",
+                "Clinical-AI-Apollo/Medical-NER",
             ]:
                 AutoTokenizer.from_pretrained(model_name)
                 AutoModelForTokenClassification.from_pretrained(model_name)
@@ -196,14 +204,9 @@ def pre_warm_model_cache(use_gpu=False):
         except Exception as e:
             print(f"  [SKIP] Transformers cache failed: {e}")
 
-    # 3. GLiNER — downloads to ~/.cache/huggingface/
-    if GLINER_AVAILABLE:
-        try:
-            _warmup_gliner = GLiNER.from_pretrained("urchade/gliner_large-v2.1")
-            del _warmup_gliner
-            print("  [CACHED] GLiNER model weights")
-        except Exception as e:
-            print(f"  [SKIP] GLiNER cache failed: {e}")
+    # 3. GLiNER — DISABLED (medical preservation handled by BioNER + expanded allowlist)
+    #    Saves ~1.4 GB RAM per worker and ~0.3s classification time per file.
+    print("  [SKIP] GLiNER disabled — using BioNER + expanded clinical allowlist instead")
 
     elapsed = round(time.time() - t0, 1)
     print(f"\nModel cache warm-up complete in {elapsed}s")

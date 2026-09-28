@@ -34,8 +34,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # Install CPU-only PyTorch and torchvision explicitly to avoid massive CUDA wheels
-RUN pip install --no-cache-dir torch==2.2.2 torchvision==0.17.2 \
-        --index-url https://download.pytorch.org/whl/cpu
+RUN pip install --no-cache-dir torch==2.5.1 torchvision==0.20.1 \
+        --index-url https://download.pytorch.org/whl/cpu \
+        --extra-index-url https://pypi.org/simple/
 
 # Install Python requirements
 COPY requirements.txt .

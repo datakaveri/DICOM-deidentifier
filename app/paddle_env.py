@@ -20,6 +20,8 @@ import os
 # These MUST be set before paddle is imported — once paddle reads them
 # they are baked into the runtime and cannot be changed.
 os.environ["FLAGS_use_mkldnn"] = "0"
+os.environ["FLAGS_use_onednn"] = "0"
+os.environ["FLAGS_enable_pir_api"] = "0"
 os.environ["PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT"] = "0"
 os.environ["FLAGS_use_mkl_packed_mha"] = "0"
 

@@ -38,7 +38,8 @@ from de_identification.keystore import KeyStore
 import time
 
 def process_file(input_path, paddle_ocr, analyzer, keystore,
-                 deid_model=None, medical_ner=None, gliner_model=None):
+                 deid_model=None, medical_ner=None, gliner_model=None,
+                 fallback_medical_ner=None):
     """Runs the full pipeline for one DICOM file; returns its pipeline audit dict."""
     import re
     start_time = time.time()
@@ -78,7 +79,8 @@ def process_file(input_path, paddle_ocr, analyzer, keystore,
     pipeline_audit = anonymize_dicom_file(
         input_path, before_output, final_output, data_snapshot,
         paddle_ocr, analyzer, keystore,
-        deid_model=deid_model, medical_ner=medical_ner, gliner_model=gliner_model
+        deid_model=deid_model, medical_ner=medical_ner, gliner_model=gliner_model,
+        fallback_medical_ner=fallback_medical_ner
     )
 
     elapsed_sec = round(time.time() - start_time, 2)
@@ -110,7 +112,8 @@ def main():
     print(f"Found {len(input_files)} file(s) to process.")
 
     use_gpu = check_gpu_available()
-    paddle_ocr, analyzer, deid_model, medical_ner, gliner_model = initialize_engines(use_gpu=use_gpu)
+    paddle_ocr, analyzer, deid_model, medical_ner, gliner_model, *extra = initialize_engines(use_gpu=use_gpu)
+    fallback_medical_ner = extra[0] if extra else None
 
     # One KeyStore shared across the whole batch, saved once at the end, so
     # every file's hash/tokenise/encrypt values stay consistent with each other.
@@ -118,8 +121,11 @@ def main():
 
     results = []
     for input_path in input_files:
-        audit = process_file(input_path, paddle_ocr, analyzer, keystore,
-                             deid_model=deid_model, medical_ner=medical_ner, gliner_model=gliner_model)
+        audit = process_file(
+            input_path, paddle_ocr, analyzer, keystore,
+            deid_model=deid_model, medical_ner=medical_ner, gliner_model=gliner_model,
+            fallback_medical_ner=fallback_medical_ner
+        )
         results.append(audit)
 
     keystore.save()

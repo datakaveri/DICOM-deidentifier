@@ -20,6 +20,23 @@ def _parse_paddle_output(res):
     if not res:
         return parsed
 
+    # Check if PaddleX / PaddleOCR v3 dict format: [{'rec_texts': [...], 'rec_boxes': [...], 'rec_scores': [...]}]
+    if isinstance(res, list) and len(res) > 0 and isinstance(res[0], dict):
+        d = res[0]
+        rec_texts = d.get('rec_texts', [])
+        rec_boxes = d.get('rec_boxes', [])
+        rec_scores = d.get('rec_scores', [])
+        for i in range(len(rec_texts)):
+            text = str(rec_texts[i])
+            score = float(rec_scores[i]) if i < len(rec_scores) else 0.9
+            box = rec_boxes[i]
+            if len(box) == 4 and not isinstance(box[0], (list, tuple, np.ndarray)):
+                box_pts = [[float(box[0]), float(box[1])], [float(box[2]), float(box[1])], [float(box[2]), float(box[3])], [float(box[0]), float(box[3])]]
+            else:
+                box_pts = box
+            parsed.append((box_pts, text, score))
+        return parsed
+
     # Check if native PaddleOCR format: [[ [box_pts, (text, conf)], ... ]]
     if isinstance(res, list) and len(res) > 0 and isinstance(res[0], list):
         # Native Paddle returns list of lines per image
@@ -69,8 +86,13 @@ def detect_text_in_regions(image_8bit, bboxes, paddle_ocr=None, padding=12, run_
         try:
             img_h, img_w = image_8bit.shape[:2]
             if hasattr(paddle_ocr, 'ocr'):
-                # Native PaddleOCR
-                res = paddle_ocr.ocr(rgb_full, cls=False)
+                try:
+                    res = paddle_ocr.ocr(rgb_full, cls=False)
+                except TypeError:
+                    try:
+                        res = paddle_ocr.ocr(rgb_full)
+                    except TypeError:
+                        res = paddle_ocr.predict(rgb_full)
             elif callable(paddle_ocr):
                 # RapidOCR / callable
                 res, _ = paddle_ocr(rgb_full)
