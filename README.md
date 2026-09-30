@@ -1,172 +1,94 @@
-# DICOM-deidentifier
+# DICOM De-Identification Pipeline
 
-Flask microservice that de-identifies PHI from DICOM tag metadata.
-Part of the **SPIDEr** pipeline at IUDX / Data Kaveri.
+De-identification pipeline for radiology DICOM files. Removes Protected Health Information (PHI) at two levels in a single unified pass:
 
-> **Scope — tags only.**  
-> Pixel-level redaction (burned-in text) is handled by a separate service
-> that integrates with this one. See [Integration](#integration) below.
+1. **Burned-in Pixel Text Redaction** — OCR (**PaddleOCR**) detects burned-in text. An ensemble classification stack (**Stanford De-ID**, **Biomedical NER**, **GLiNER-BioMed**, **Microsoft Presidio**, and clinical allowlists) distinguishes patient PHI from medical findings and anatomy markers. Redaction uses **character stroke & drop-shadow segmentation** combined with **Navier-Stokes neighbor inpainting**, eliminating dark silhouettes while preserving underlying bone and tissue textures. A two-tier verification gate ensures complete anonymization with near-zero latency overhead.
+2. **DICOM Tag De-Identification** — Every header tag is processed through a per-tag technique (cryptographic hash, tokenisation, format-preserving encryption, date masking, suppression, or retention) defined in [`app/de_identification/tag_mapping.py`](app/de_identification/tag_mapping.py), alongside private/vendor tag stripping and UID regeneration.
 
----
-
-## What it does
-
-For each uploaded DICOM file the service:
-
-| Field type | Action |
-|------------|--------|
-| Patient name, address, phone, comments, physician names, institution | Masked → `*` |
-| Patient ID, Accession number | SHA-256 pseudonymised (12-char hex) |
-| Dates (birth, study, series, acquisition) | Generalised to year → `YYYY0101` |
-| Study / Series / SOP Instance UIDs | Replaced with fresh generated UIDs |
-
-Policy aligns with **DICOM PS3.15 Attribute Confidentiality Profiles**.
+The output is always a valid `.dcm` file (with optional high-resolution `.png` visual preview for audits).
 
 ---
 
-## Endpoints
+## Project Layout
 
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/test_DICOM_deidentifier` | Health check |
-| `POST` | `/inspect_DICOM` | List PHI tags found in the file |
-| `POST` | `/process_DICOM` | De-identify tags; return cleaned DICOM |
-
-### POST `/process_DICOM`
-
-**Request** — `multipart/form-data`
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `file` | file | DICOM `.dcm` file |
-
-**Response** — JSON
-
-```json
-{
-  "status": "success",
-  "fields_processed": 10,
-  "audit": [
-    {"field": "PatientName",    "old_value": "SMITH^JANE", "action": "masked"},
-    {"field": "PatientID",      "old_value": "MRN789012",  "action": "hashed"},
-    {"field": "PatientBirthDate","old_value": "19850322",  "action": "date_generalised"}
-  ],
-  "deidentified_dicom": "<base64-encoded .dcm bytes>"
-}
 ```
-
-### POST `/inspect_DICOM`
-
-**Request** — `multipart/form-data` with `file`
-
-**Response** — JSON
-
-```json
-{
-  "status": "success",
-  "count": 8,
-  "phi_tags": [
-    {"field": "PatientName",  "value": "SMITH^JANE"},
-    {"field": "InstitutionName", "value": "CITY EYE CLINIC"}
-  ]
-}
+├── Dockerfile                  # Production container definition (air-gapped & offline-ready)
+├── requirements.txt            # Pinned dependencies (PaddleOCR, PyTorch, Presidio, GLiNER)
+├── secured.json                # Shared cryptographic key and token material
+├── app/
+│   ├── main.py                 # Main batch pipeline entry point
+│   ├── config.py               # Paths, environment variables, clinical allowlist, PII regex
+│   ├── engines.py              # PaddleOCR, Presidio, GLiNER, Stanford De-ID model initializers
+│   ├── pipeline.py             # 7-stage anonymization orchestrator
+│   ├── ocr_detect.py           # PaddleOCR full-image and region-based detection
+│   ├── classify.py             # Multi-model PHI vs clinical classification matrix
+│   ├── masking.py              # Character stroke & drop-shadow isolation + Navier-Stokes inpainting
+│   ├── verify.py               # Two-tier verification (Tier 1: Stroke check <1ms, Tier 2: OCR fallback)
+│   ├── dicom_io.py             # Pixel write-back and DICOM descriptor header updates
+│   ├── phi_tags.py             # PHI tag scanner and burned-in tag value cross-checker
+│   ├── bbox_visualize.py       # Visual bbox preview overlay generator
+│   └── de_identification/      # Header tag de-identification engine & keystore
+├── data/                       # Input DICOM files (*.dcm)
+└── output/                     # Anonymized DICOMs, previews, and JSON audit logs
 ```
 
 ---
 
-## Run locally
+## Running Locally
 
 ```bash
-git clone https://github.com/datakaveri/DICOM-deidentifier.git
-cd DICOM-deidentifier
-python -m venv venv
-source venv/bin/activate
+# 1. Activate virtual environment
+python -m venv venv && source venv/bin/activate
+
+# 2. Install dependencies
 pip install -r requirements.txt
-python server.py
+python -m spacy download en_core_web_sm
+
+# 3. Run the batch pipeline
+cd app
+python main.py
 ```
 
-Test with curl:
+### Running Tests
+
 ```bash
-curl -F "file=@sample_data/retinal_phi.dcm" http://localhost:5001/inspect_DICOM
-curl -F "file=@sample_data/retinal_phi.dcm" http://localhost:5001/process_DICOM
+# Execute unit test suite with coverage
+pytest tests/ -v
 ```
+
+### Outputs Generated (per DICOM file)
+Under `app/output/<sample_name>/`:
+- `after_deidentification.dcm` — Final anonymized DICOM (pixel-redacted + tag de-identified).
+- `after_preview.png` — Normalized visual inspection preview image.
+- `before_deidentification.dcm` — Intermediate checkpoint (pixel-redacted, original tags).
+- `bbox_regions.png` — Bounding boxes of detected PHI annotations.
+- `pipeline_audit.json` — Detailed audit log (redacted regions, execution time, status).
+- `data.json` & `phi_tags.json` — Pre-deidentification tag snapshots.
 
 ---
 
-## Run with Docker
+## Running with Docker
 
 ```bash
+# Build the production image (model weights are pre-cached during build)
 docker build -t dicom-deidentifier .
-docker run -p 5001:5001 dicom-deidentifier
+
+# Run the batch pipeline
+docker run --rm \
+  -v /path/to/input/dicoms:/app/data \
+  -v /path/to/config:/app/config \
+  -v /path/to/output:/app/output \
+  dicom-deidentifier
 ```
 
-Or with compose:
-```bash
-docker-compose up --build
-```
+The container processes every `.dcm` file located in `/app/data` and saves anonymized outputs and logs to `/app/output`. Model weights are embedded into the image during `docker build`, enabling fully offline, air-gapped deployment in secure clinical environments.
 
 ---
 
-## Run tests
+## Environment Variables
 
-```bash
-pytest tests/ -v --cov=deidentifier
-```
-
----
-
-## Integration
-
-### SPIDEr pipeline
-
-This service handles **Step 1 — tag de-identification**.  
-A second service handles **Step 2 — pixel de-identification** (burned-in text redaction).
-
-Typical integration flow:
-```
-[DICOM input]
-    │
-    ▼
-POST /process_DICOM          ← this service (tags)
-    │  deidentified_dicom (base64)
-    ▼
-POST /process_DICOM_pixels   ← pixel de-identification service
-    │  pixel-redacted DICOM
-    ▼
-[Clean DICOM output]
-```
-
-### Adding pixel de-identification
-
-The pixel service should:
-1. Accept a DICOM file (multipart or base64 JSON body)
-2. OCR-detect and inpaint burned-in text
-3. Return cleaned DICOM bytes
-
-Suggested endpoint to add to this repo (or a separate service):
-```
-POST /process_DICOM_pixels
-```
-
-It can consume the `deidentified_dicom` base64 field from `/process_DICOM`
-directly — no intermediate file needed.
-
----
-
-## Project structure
-
-```
-DICOM-deidentifier/
-├── deidentifier.py      # core de-identification logic (import this)
-├── server.py            # Flask REST API
-├── detect_pii.py        # optional: Presidio-based PII scanner
-├── server_config.cfg    # host / port
-├── requirements.txt
-├── Dockerfile
-├── docker-compose.yml
-├── sample_data/
-│   ├── retinal_phi.dcm      # synthetic retinal fundus with PHI
-│   └── synthetic_phi.dcm    # synthetic chest CT with PHI
-└── tests/
-    └── test_deidentifier.py
-```
+| Variable | Default | Purpose |
+|---|---|---|
+| `SKALD_DATA_DIR` | `/app/data` | Input directory containing DICOM files (`*.dcm`) |
+| `SKALD_CONFIG_DIR` | `/app/config` | Configuration directory |
+| `SKALD_OUTPUT_DIR` | `/app/output` | Destination for anonymized files, audit logs, and keys |

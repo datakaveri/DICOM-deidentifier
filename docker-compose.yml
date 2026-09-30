@@ -1,14 +1,15 @@
-version: "3.8"
-
 services:
-  dicom_deidentifier:
-    build: .
-    container_name: dicom_deidentifier_container
-    ports:
-      - "5001:5001"
+  dicom-deidentifier:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dicom-deidentifier
     environment:
-      - FLASK_ENV=production
+      - SKALD_DATA_DIR=/app/data
+      - SKALD_CONFIG_DIR=/app/config
+      - SKALD_OUTPUT_DIR=/app/output
     volumes:
-      - .:/app
-    working_dir: /app
-    command: ["python", "server.py"]
+      - ./data:/app/data
+      - ./config:/app/config
+      - ./output:/app/output
+    restart: "no"
