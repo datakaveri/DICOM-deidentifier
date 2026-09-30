@@ -116,8 +116,11 @@ def test_mock_indian_hybrid_ner_in_classify_phi():
         {"text": "L26", "bbox": [10, 10, 40, 30]},
     ]
 
-    redacted = classify_phi(test_cases, (1024, 1024), indian_ner=mock_ner)
+    redacted = classify_phi(
+        test_cases, (1024, 1024), indian_ner=mock_ner, metadata_values={"VENKATA SATYANARAYANA"}
+    )
     redacted_texts = [r["text"] for r in redacted]
+
 
     assert "VENKATA SATYANARAYANA" in redacted_texts
     assert "DR. KAVITHA REDDY" in redacted_texts

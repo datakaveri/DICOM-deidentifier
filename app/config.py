@@ -58,76 +58,23 @@ SECURED_KEYSTORE_FILE = "secured.json"
 # category in identify_phi_tags (see phi_tags.py).
 EXTRA_ID_FIELDS = set()
 
-# Clinical terms that must NEVER be redacted (anatomy / positioning / findings / modalities).
-# Expanded for Indian radiology DICOM datasets where burned-in text frequently contains
-# radiological findings, vertebral markers, and technique parameters alongside PHI.
-CLINICAL_ALLOWLIST = {
-    # ── Laterality & positioning markers ──────────────────────────────────────
-    "L", "R", "LT", "RT", "LEFT", "RIGHT",
-    "PA", "AP", "LAT", "LL", "RL", "LATERAL",
-    "ERECT", "SUPINE", "PRONE", "DECUBITUS", "UPRIGHT",
-    "PORTABLE", "MOBILE", "STAT", "ROUTINE",
-    "STANDING", "SITTING", "BUCKY", "CROSS-TABLE", "FROG-LEG",
-    "ANTEROPOSTERIOR", "POSTEROANTERIOR", "ANTERIOR", "POSTERIOR",
-    "PROJECTION", "VIEW",
+# =============================================================================
+# CLINICAL ALLOWLIST — COMMENTED OUT IN FAVOR OF METADATA CROSS-VERIFICATION
+# =============================================================================
+# Medical information and findings are now preserved dynamically by
+# METADATA CROSS-VERIFICATION rather than a hardcoded dictionary.
+# Text is only redacted if it matches the DICOM metadata PII (PatientName,
+# PatientID, DOB, Doctor, Hospital, Address) or universal PII (Aadhaar, Phone, etc.).
+# All clinical findings (e.g. Diaphragm, Vessel pruning, Consolidation) are untouched.
+CLINICAL_ALLOWLIST = set()
 
-    # ── Body regions & gross anatomy ─────────────────────────────────────────
-    "CHEST", "ABDOMEN", "PELVIS", "SKULL", "SPINE", "THORAX",
-    "CERVICAL", "THORACIC", "LUMBAR", "SACRAL", "DORSAL",
-    "SHOULDER", "ELBOW", "WRIST", "HAND", "HIP", "KNEE", "ANKLE", "FOOT",
-    "CLAVICLE", "RIB", "RIBS", "STERNUM", "SCAPULA", "HUMERUS",
-    "FEMUR", "TIBIA", "FIBULA", "RADIUS", "ULNA", "PATELLA",
-    "MANDIBLE", "MAXILLA", "ORBIT", "SINUS", "SINUSES",
-
-    # ── Organs & internal structures ─────────────────────────────────────────
-    "HEART", "LUNG", "LUNGS", "DIAPHRAGM", "AORTA", "AORTIC",
-    "TRACHEA", "BRONCHUS", "BRONCHI", "MEDIASTINUM", "HILUM", "HILAR",
-    "PLEURA", "PLEURAL", "PERICARDIUM", "PERICARDIAL", "CARDIAC",
-    "LIVER", "SPLEEN", "KIDNEY", "KIDNEYS", "BLADDER", "PANCREAS",
-    "PARENCHYMA", "PARENCHYMAL", "COSTOPHRENIC", "SULCUS",
-    "APEX", "BASE", "LOBE", "LUL", "RUL", "LLL", "RLL", "RML",
-
-    # ── Radiological findings & impressions ──────────────────────────────────
-    "NORMAL", "ABNORMAL", "NAD", "WNL", "UNREMARKABLE",
-    "STUDY", "IMPRESSION", "FINDINGS", "CONCLUSION", "REPORT", "RESULT",
-    "OPACITY", "OPACITIES", "CONSOLIDATION", "EFFUSION",
-    "PNEUMOTHORAX", "PNEUMONIA", "INFILTRATE", "INFILTRATES", "EDEMA",
-    "CARDIOMEGALY", "CARDIOMEGALLY", "ATELECTASIS",
-    "FRACTURE", "DISLOCATION", "SUBLUXATION",
-    "OSTEOPOROSIS", "OSTEOPENIA", "SCOLIOSIS", "KYPHOSIS", "LORDOSIS",
-    "SPONDYLOSIS", "SPONDYLOLISTHESIS", "SPONDYLITIS",
-    "TUBERCULOSIS", "TB", "KOCH", "MILIARY", "PTB",
-    "HEPATOMEGALY", "SPLENOMEGALY", "LYMPHADENOPATHY",
-    "ASCITES", "CALCIFICATION", "CALCIFIED", "FIBROSIS",
-    "LESION", "MASS", "NODULE", "NODULES", "CYST",
-    "DEGENERATIVE", "OSTEOPHYTE", "OSTEOPHYTES",
-
-    # ── Imaging modalities & techniques ──────────────────────────────────────
-    "XRAY", "X-RAY", "CT", "MRI", "USG", "OPG", "IOPA",
-    "CEPHALOGRAM", "MAMMOGRAM", "SONOGRAPHY", "FLUOROSCOPY",
-    "CXR", "CX", "PA VIEW", "AP VIEW", "DX", "CR", "DR",
-
-    # ── Exposure & technique parameters ──────────────────────────────────────
-    "KVP", "KV", "MAS", "MA", "SEC", "CM", "MM", "FOV",
-    "MASE", "FSD", "SID", "SOD", "COLLIMATION", "FILTER",
-    "EXPOSURE", "EXP", "DOSE", "CASSETTE", "CONE", "GRID",
-    "NO-GRID", "NOGRID", "TECH", "TECHNOLOGIST", "INSP", "INSPIRATION",
-
-    # ── Equipment manufacturers (safe to preserve on burned-in text) ─────────
-    "SIEMENS", "PHILIPS", "GE", "HEALTHCARE", "MEDICAL", "SYSTEMS",
-    "FUJI", "FUJIFILM", "CARESTREAM", "AGFA", "KODAK", "SHIMADZU",
-    "MICRODICOM", "CANON", "KONICA", "MINOLTA", "ALLENGERS", "TRIVITRON",
-
-    # ── Common prepositions/articles in clinical text ────────────────────────
-    "OF", "AND", "TO", "WITH", "FOR", "ON", "BY", "IN", "THE", "NO", "SANS",
-
-    # ── Vertebral markers (Indian spinal X-rays frequently burn these in) ────
-    "C1", "C2", "C3", "C4", "C5", "C6", "C7",
-    "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9", "T10", "T11", "T12",
-    "L1", "L2", "L3", "L4", "L5", "S1", "S2",
-    "D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8", "D9", "D10", "D11", "D12",
-    "L26", "R26", "L12", "R12",
-}
+# CLINICAL_ALLOWLIST_DISABLED = {
+#     "L", "R", "LT", "RT", "LEFT", "RIGHT", "PA", "AP", "LAT", "LL", "RL", "LATERAL",
+#     "ERECT", "SUPINE", "PRONE", "DECUBITUS", "UPRIGHT", "PORTABLE", "MOBILE",
+#     "CHEST", "ABDOMEN", "PELVIS", "SKULL", "SPINE", "THORAX", "HEART", "LUNG", "LUNGS",
+#     "NORMAL", "CONSOLIDATION", "EFFUSION", "PNEUMOTHORAX", "INFILTRATE", "CARDIOMEGALY",
+#     "FLATTENED", "DIAPHRAGM", "VESSEL", "PRUNING", ...
+# }
 
 # Non-PII exclusions: Common clerical, greeting, or structural tokens that should never be flagged as PHI
 NON_PII_EXCLUSIONS = {

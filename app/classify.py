@@ -28,37 +28,56 @@ def _normalize_ocr(text):
     return ''.join(_OCR_SUBSTITUTIONS.get(c, c) for c in t)
 
 
-def _is_fuzzy_clinical(text, threshold=0.82):
+def _is_fuzzy_clinical(text, threshold=0.78):
     """
     Fuzzy-match OCR-corrupted text against the expanded CLINICAL_ALLOWLIST.
-    Catches 'N0RMAL', 'NCRMAL', 'ANIIEROPOSTERIOR', etc.
+    Catches 'N0RMAL', 'NCRMAL', 'NORMA', 'IORMA', 'DIAPHGRAM', 'CONSOLRA', 'DATION', etc.
 
     Strategy:
       1. OCR-normalize the text (fix 0->O, 1->I, etc.) and try exact match.
-      2. Tokenize and check if ALL tokens are in the allowlist.
-      3. For longer terms (≥6 chars), use SequenceMatcher fuzzy similarity.
+      2. Check common clinical OCR misspellings & truncations directly.
+      3. Tokenize and check if clinical keywords match.
+      4. For terms (≥4 chars), use SequenceMatcher fuzzy similarity.
     """
     val_raw = text.strip().upper()
     # 0. Direct exact match (before OCR normalization — preserves L5, T12, C7 etc.)
     if val_raw in CLINICAL_ALLOWLIST:
         return True
+
+    # Common radiological OCR fragments and spelling variations
+    known_clinical_fragments = {
+        "NORMA", "IORMA", "NORMALI", "DIAPHGRAM", "CONSOLRA", "DATION",
+        "VESSEL", "VESSELS", "PRUNING", "FLATTENED", "FLATTENING",
+        "HAZINESS", "TENTING", "HEMIDIAPHRAGM"
+    }
+    if val_raw in known_clinical_fragments:
+        return True
+
     val = _normalize_ocr(text)
     # 1. Exact match on OCR-normalized text
-    if val in CLINICAL_ALLOWLIST:
+    if val in CLINICAL_ALLOWLIST or val in known_clinical_fragments:
         return True
-    # 2. Token-level check (catches multi-word clinical phrases)
+
+    # 2. Token-level check (catches multi-word clinical phrases like "FLATTENED DIAPHGRAM")
     tokens = re.findall(r'[A-Z0-9]+', val)
-    if tokens and all(
-        t in CLINICAL_ALLOWLIST
-        or re.match(r'^(?:L|R|C|T|S|D)\d{0,2}$', t)
-        or re.match(r'^\d{1,4}$', t)
-        for t in tokens
-    ):
-        return True
-    # 3. Fuzzy match for longer terms (≥6 chars) to catch OCR corruption
-    if len(val) >= 6:
+    if tokens:
+        clinical_set = CLINICAL_ALLOWLIST.union(known_clinical_fragments)
+        if all(
+            t in clinical_set
+            or re.match(r'^(?:L|R|C|T|S|D)\d{0,2}$', t)
+            or re.match(r'^\d{1,4}$', t)
+            for t in tokens
+        ):
+            return True
+        # If all alphabetic tokens are clinical
+        alpha_tokens = [t for t in tokens if re.search(r'[A-Z]', t)]
+        if alpha_tokens and all(t in clinical_set for t in alpha_tokens):
+            return True
+
+    # 3. Fuzzy match for terms (≥4 chars) to catch OCR corruption
+    if len(val) >= 4:
         for term in CLINICAL_ALLOWLIST:
-            if len(term) < 6:
+            if len(term) < 4:
                 continue
             if abs(len(val) - len(term)) > 3:
                 continue
@@ -355,62 +374,44 @@ def _is_clinical(text):
             "ACUTE", "CONSOLIDATION", "PATTERN", "BILATERAL", "EXAMINATION", "STUDY", "VIEW",
             "KVP", "MAS", "SID", "CM"
         })
-        # If all tokens or a majority of clinical keywords match
-        if all(t in expanded_safe or re.match(r'^(?:L|R|C|T|S|D)\d{0,2}$', t) or re.match(r'^\d{1,4}$', t) for t in tokens):
-            return True
         clinical_matches = sum(1 for t in tokens if t in expanded_safe)
+        # If all tokens or a majority of clinical keywords match
         if clinical_matches >= 2 and (clinical_matches / len(tokens)) >= 0.5:
             return True
         
     return False
 
 
-def classify_phi(merged, image_shape, analyzer=None, gliner_model=None, medical_ner=None, deid_model=None, fallback_medical_ner=None, indian_ner=None):
+def classify_phi(merged, image_shape, analyzer=None, gliner_model=None, medical_ner=None, deid_model=None, fallback_medical_ner=None, indian_ner=None, metadata_values=None):
     """
-    Classifies each merged detection as PHI (redact) or safe (keep).
-    Uses Indian Hybrid NER (HiNER + IndicNER + XLM-RoBERTa with Truecasing)
-    alongside Biomedical NER, Clinical allowlists, and Indian PII regex patterns.
+    Classifies each merged detection as PHI (redact) or safe (keep) using
+    GROUND-TRUTH METADATA CROSS-VERIFICATION.
+
+    Core Strategy:
+      1. Candidate text is cross-verified against the DICOM metadata ground truth
+         (PatientName, PatientID, DOB, Doctor, Hospital, Address).
+      2. Universal PII patterns (Aadhaar, PAN, Phone, Email, ABHA) are checked.
+      3. Explicit demographic labels with values (PATIENT:, MRN:, DOB:, DR:) are checked.
+      4. General NER / Presidio false positives (e.g. tagging anatomy/findings as PERSON or LOCATION)
+         are filtered out unless corroborated by metadata or explicit demographic label.
+      5. Clinical findings, anatomy, and scan text that do not match metadata PII are NEVER touched.
+         (Clinical allowlist is commented out in favor of dynamic metadata cross-verification).
     """
     h, w = image_shape[:2]
     phi_regions = []
 
-    def _is_text_pure_clinical(text_str):
-        val = text_str.strip().upper()
-        if not val:
-            return True
-
-        tokens = re.findall(r'[A-Z0-9]+', val)
-        if not tokens:
-            return True
-
-        safe_terms = {
-            "L", "R", "LT", "RT", "LEFT", "RIGHT", "PA", "AP", "LAT", "LL", "RL", "LATERAL",
-            "A", "P", "M", "F", "O", "CXR", "CHEST", "PORTABLE", "MOBILE", "SUPINE", "ERECT",
-            "UPRIGHT", "SEMI-UPRIGHT", "SEMI", "UPPER", "LOWER", "MIDDLE", "LOBE", "LUL", "RUL",
-            "LLL", "RLL", "RML", "CLAVICLE", "RIB", "HEART", "LUNG", "LUNGS", "DIAPHRAGM",
-            "TRACHEA", "BRONCHUS", "APEX", "BASE", "CARDIAC", "AORTA", "PLEURAL", "ANGLE",
-            "COSTOPHRENIC", "SULCUS", "MEDIASTINUM", "HILUM", "HILAR", "PARENCHYMA", "PARENCHYMAL",
-            "QUADRANT", "KV", "KVP", "MA", "MAS", "MS", "SEC", "MM", "CM", "EXP", "EXPOSURE",
-            "TECH", "TECHNOLOGIST", "COLLIMATION", "FILTER", "FSD", "SID", "SOD", "MASE",
-            "GRID", "NO-GRID", "NOGRID", "SANS", "INSPIRATION", "EXPIRATION", "INSP", "EXP",
-            "INT", "EXT", "MED", "DECUB", "DECUBITUS", "VIEW", "OF", "AND", "TO", "WITH",
-            "FOR", "ON", "BY", "IN", "THE", "PORT", "AP-PORTABLE", "PA-ERECT", "AP/PA",
-            "NORMAL", "PNEUMOTHORAX", "EFFUSION", "INFILTRATE", "CONSOLIDATION", "EDEMA",
-            "CARDIOMEGALY", "PNEUMONIA", "OPACITY", "OPACITIES", "CARDIAC", "AORTIC",
-            "SIEMENS", "PHILIPS", "GE", "HEALTHCARE", "MEDICAL", "SYSTEMS", "MICRODICOM",
-            "ANTEROPOSTERIOR", "POSTEROANTERIOR", "ANIIEROPOSTERIOR", "ANIIEROPAOSIIERIORR",
-            "PROJECTION", "ANTERIOR", "POSTERIOR", "L26", "R26"
-        }
-
-        for token in tokens:
-            if token in safe_terms:
-                continue
-            if re.match(r'^\d{1,4}$', token):
-                continue
-            if re.match(r'^(?:L|R|C|T|S)\d{0,2}$', token):
-                continue
-            return False
-        return True
+    # ── Prepare normalized metadata ground truth cache ────────────────────────
+    normalized_metadata = set()
+    metadata_tokens = set()
+    for sv in (metadata_values or []):
+        sv_clean = sv.strip().upper()
+        if len(sv_clean) >= 3:
+            normalized_metadata.add(sv_clean)
+            for t in re.findall(r'[A-Z0-9]+', sv_clean):
+                if len(t) >= 3 and not re.match(r'^\d+$', t):
+                    metadata_tokens.add(t)
+                elif len(t) >= 4:
+                    metadata_tokens.add(t)
 
     for det in merged:
         text = det["text"]
@@ -431,13 +432,43 @@ def classify_phi(merged, image_shape, analyzer=None, gliner_model=None, medical_
         val_upper = clean_text.upper()
         reason = []
 
-        # ── 1. PARALLEL SIGNAL GATHERING (Run All Models Simultaneously) ──────
+        # ── 1. METADATA CROSS-VERIFICATION SIGNAL ─────────────────────────────
+        val_tokens = [t for t in re.findall(r'[A-Z0-9]+', val_upper) if len(t) >= 3]
+        matches_metadata = False
+        matched_tag_val = None
 
-        # Signal A: Clinical Allowlist, Shorthand, & Fuzzy OCR Match (e.g. L26, R12, CHEST, AP, N0RMAL)
-        is_clinical_allowlist = _is_clinical(clean_text) or _is_text_pure_clinical(clean_text) or _is_fuzzy_clinical(clean_text)
+        for sv in normalized_metadata:
+            if val_upper == sv or (len(sv) >= 4 and sv in val_upper) or (len(val_upper) >= 4 and val_upper in sv):
+                matches_metadata = True
+                matched_tag_val = sv
+                break
+        if not matches_metadata and metadata_tokens:
+            for t in val_tokens:
+                if t in metadata_tokens:
+                    matches_metadata = True
+                    matched_tag_val = t
+                    break
 
-        # Signal B: Indian Hybrid NER & General NER — Person, Location, Organization
-        # Evaluates MuRIL (HiNER), IndicNER, and XLM-RoBERTa with Truecasing
+        # ── 2. UNIVERSAL PII REGEX PATTERNS ───────────────────────────────────
+        matches_universal_pii = False
+        regex_reasons = []
+        for pat_name, pat_regex in PII_PATTERNS.items():
+            if re.search(pat_regex, clean_text, re.IGNORECASE):
+                matches_universal_pii = True
+                regex_reasons.append(f"regex:{pat_name}")
+                break
+
+        # ── 3. EXPLICIT DEMOGRAPHIC LABELS ────────────────────────────────────
+        generic_demographic_labels = [
+            "PATIENT", "NAME", "DOB", "D0B", "0B:", "BIRTH", "MRN", "UHID", "PID",
+            "DR.", "DOCTOR", "PHYSICIAN", "HOSPITAL", "CLINIC", "INSTITUT",
+            "CONFIDENTIAL", "MEDICAL RECORD"
+        ]
+        has_id_label = bool(re.search(r'\bID\b', val_upper))
+        has_demographic_label = any(label in val_upper for label in generic_demographic_labels) or has_id_label
+        has_demographic_value = bool(has_demographic_label and len(clean_text) >= 5)
+
+        # ── 4. GENERAL NER & PRESIDIO ANALYSIS ────────────────────────────────
         ner_phi_labels = []
         ner_engine = indian_ner if indian_ner is not None else deid_model
         if ner_engine:
@@ -447,7 +478,7 @@ def classify_phi(merged, image_shape, analyzer=None, gliner_model=None, medical_
                     for ent in entities:
                         score = float(ent.get("score", 0.0))
                         cat = str(ent.get("cat", "")).upper()
-                        if score >= 0.40 and cat in {"PERSON", "LOCATION", "ORGANIZATION", "PER", "LOC", "ORG"}:
+                        if score >= 0.45 and cat in {"PERSON", "LOCATION", "ORGANIZATION", "PER", "LOC", "ORG"}:
                             ner_phi_labels.append(f"ner_{cat.lower()}")
                 else:
                     entities = ner_engine(clean_text)
@@ -458,150 +489,53 @@ def classify_phi(merged, image_shape, analyzer=None, gliner_model=None, medical_
                         if score > 0.50 and clean_group in {"PER", "LOC", "ORG", "PERSON", "LOCATION", "ORGANIZATION"}:
                             ner_phi_labels.append(clean_group)
             except Exception as e:
-                log.debug(f"NER model error: {e}")
+                log.debug(f"NER error: {e}")
 
-        # Signal C: Regex PII Patterns & Demographic Labels
-        regex_reasons = []
-        generic_demographic_labels = [
-            "NAME", "PATIENT", "ATIENT", "TIENT", "DATE", "DOB", "D0B", "0B:", "BIRTH", "MRN", "UHID", "PID", "AGE", "SEX", "GENDER",
-            "MALE", "FEMALE", "DR.", "DOCTOR", "PHYSICIAN", "HOSPITAL", "OSPITAL", "SPITAL", "HOSP", "CLINIC", "INSTITUT",
-            "CONFIDENTIAL", "FIDENTIAL", "IDENTIAL", "DENTIAL", "CONFID", "CONFIDCNTTIAC", "MEDICAL RECORD", "RESTRICTED", "PROPRIETARY", "SECRET"
-        ]
-        has_id_label = bool(re.search(r'\bID\b', val_upper))
-        has_gender_bracket = bool(re.search(r'\[\s*[MF]\s*\]|\(\s*[MF]\s*\)', val_upper))
-        if val_upper not in NON_PII_EXCLUSIONS:
-            has_demographic_label = any(label in val_upper for label in generic_demographic_labels) or has_id_label or has_gender_bracket
-            if has_demographic_label:
-                regex_reasons.append("regex:demographic_label")
-        else:
-            has_demographic_label = False
-        for pat_name, pat_regex in PII_PATTERNS.items():
-            if re.search(pat_regex, clean_text, re.IGNORECASE):
-                regex_reasons.append(f"regex:pii_pattern_{pat_name}")
-                break
-
-        # Signal D: Presidio NLP Analyzer
         presidio_flagged = False
         if analyzer:
             try:
                 results = analyzer.analyze(text=clean_text, language="en")
-                if any(r.entity_type in {"PERSON", "DATE_TIME", "LOCATION", "EMAIL_ADDRESS", "PHONE_NUMBER"} and r.score > 0.40 for r in results):
+                if any(r.entity_type in {"PERSON", "DATE_TIME", "LOCATION", "EMAIL_ADDRESS", "PHONE_NUMBER"} and r.score > 0.50 for r in results):
                     presidio_flagged = True
             except Exception:
                 pass
 
-
-        # Signal E: Supervised Biomedical NER (Primary: d4data, Fallback: Clinical-AI-Apollo)
-        med_ner_labels = []
-        medical_target_groups = {
-            "ANATOMICAL_STRUCTURE", "DIAGNOSTIC_PROCEDURE", "DISEASE_DISORDER",
-            "SIGN_SYMPTOM", "LAB_VALUE", "MEDICATION",
-            "BIOLOGICAL_STRUCTURE", "THERAPEUTIC_PROCEDURE", "QUALITATIVE_CONCEPT",
-            "BIOLOGICAL_ATTRIBUTE"
-        }
-        if medical_ner:
-            try:
-                entities = medical_ner(clean_text)
-                for ent in entities:
-                    score = float(ent.get("score", 0.0))
-                    raw_group = str(ent.get("entity_group") or ent.get("entity") or "").strip()
-                    clean_group = re.sub(r'^[BILOU]-', '', raw_group, flags=re.IGNORECASE).upper()
-                    if score > 0.35 and clean_group in medical_target_groups:
-                        med_ner_labels.append(clean_group)
-            except Exception as e:
-                log.debug(f"Primary Medical NER prediction failed: {e}")
-
-        # Fallback to Clinical-AI-Apollo if primary NER found no medical entities
-        if not med_ner_labels and fallback_medical_ner:
-            try:
-                entities = fallback_medical_ner(clean_text)
-                for ent in entities:
-                    score = float(ent.get("score", 0.0))
-                    raw_group = str(ent.get("entity_group") or ent.get("entity") or "").strip()
-                    clean_group = re.sub(r'^[BILOU]-', '', raw_group, flags=re.IGNORECASE).upper()
-                    if score > 0.25 and clean_group in medical_target_groups:
-                        med_ner_labels.append(clean_group)
-            except Exception as e:
-                log.debug(f"Fallback Medical NER prediction failed: {e}")
-
-        # Signal F: GLiNER-BioMed Zero-Shot Model
-        gliner_labels = []
-        if gliner_model:
-            try:
-                labels = [
-                    "radiology marker", "laterality code", "anatomical position shorthand", "rib marker",
-                    "radiological code", "thoracic anatomy", "chest anatomy", "body part", "organ",
-                    "cardiac structure", "pulmonary structure", "skeletal structure",
-                    "lung pathology", "cardiac finding", "disease", "medical condition",
-                    "clinical finding", "radiological finding", "medical procedure",
-                    "diagnostic test", "imaging technique", "patient positioning",
-                    "scan parameter", "exposure setting", "medical device", "medical equipment",
-                    "imaging modality", "medication", "drug name", "vital sign", "lab value",
-                    "measurement", "anatomical direction", "laterality marker",
-                ]
-                thresh = 0.20 if len(clean_text) <= 5 else 0.35
-                entities = gliner_model.predict_entities(clean_text, labels, threshold=thresh)
-                for ent in entities:
-                    if ent["label"] in labels:
-                        gliner_labels.append(ent["label"])
-            except Exception as e:
-                log.debug(f"GLiNER-BioMed clinical check failed: {e}")
-
-        # ── 2. SIMULTANEOUS MATRIX RESOLUTION ─────────────────────────────────
-
-        phi_signal = bool(ner_phi_labels or regex_reasons or presidio_flagged)
-        medical_signal = bool(med_ner_labels or gliner_labels)
-
-        # Condition 1: Clinical Allowlist / Shorthand (Always KEPT)
-        if is_clinical_allowlist:
-            is_phi = False
-            reason.append("clinical:allowlist")
-
-        # Condition 2: Simultaneous PHI & Medical Signals present
-        elif phi_signal and medical_signal:
-            # Check if string carries explicit demographic / PII tokens
-            if has_demographic_label or ner_phi_labels or presidio_flagged:
-                is_phi = True
-                reason.append(f"simultaneous_matrix:phi_overrides_medical(phi={','.join(ner_phi_labels + regex_reasons)}, med={','.join(med_ner_labels + gliner_labels)})")
-            else:
-                is_phi = False
-                reason.append(f"simultaneous_matrix:medical_preserved({','.join(med_ner_labels + gliner_labels)})")
-
-        # Condition 3: Pure PHI Signal (No Medical Signal)
-        elif phi_signal:
+        # ── 5. CROSS-VERIFICATION DECISION MATRIX ──────────────────────────────
+        # Rule 1: Text directly matches DICOM metadata ground truth (PatientName, ID, Doctor, Hospital, DOB)
+        if matches_metadata:
             is_phi = True
-            reasons_combined = ner_phi_labels + regex_reasons + (["presidio"] if presidio_flagged else [])
-            reason.append(f"simultaneous_matrix:phi_detected({','.join(reasons_combined)})")
+            reason.append(f"cross_verify:metadata_match({matched_tag_val})")
 
-        # Condition 4: Pure Medical Signal (No PHI Signal)
-        elif medical_signal:
-            is_phi = False
-            reason.append(f"simultaneous_matrix:medical_entity_preserved({','.join(med_ner_labels + gliner_labels)})")
+        # Rule 2: Text matches universal structured PII pattern (Aadhaar, PAN, phone, email)
+        elif matches_universal_pii:
+            is_phi = True
+            reason.append(f"cross_verify:universal_pii({','.join(regex_reasons)})")
 
-        # Condition 5: Exposure Number Guard
-        elif re.match(r'^\d{1,4}(?:\.\d+)?(?:\s*-\s*\d{1,4}(?:\.\d+)?)?$', clean_text):
-            is_phi = False
-            reason.append("clinical:exposure_number")
+        # Rule 3: Text has explicit demographic label with value (e.g. "PATIENT: ...", "DOB: ...")
+        elif has_demographic_value and (ner_phi_labels or presidio_flagged or any(c.isdigit() for c in clean_text) or len(val_tokens) >= 2):
+            is_phi = True
+            reason.append("cross_verify:demographic_labeled_pii")
 
-        # Condition 5.5: Non-PII & Clerical Guard (tokens purely in NON_PII_EXCLUSIONS or CLINICAL_ALLOWLIST or numbers)
-        elif all(t in NON_PII_EXCLUSIONS or t in CLINICAL_ALLOWLIST or re.match(r'^\d+$', t) for t in re.findall(r'[A-Z0-9]+', val_upper)):
-            is_phi = False
-            reason.append("non_pii:clerical_safe")
-
-        # Condition 6: Default Fallback
-        else:
-            if re.search(r'[A-Za-z]', clean_text):
+        # Rule 4: NER / Presidio detected person or location
+        # MUST BE CORROBORATED by metadata or demographic label to avoid destroying medical text
+        elif ner_phi_labels or presidio_flagged:
+            if has_demographic_label or matches_metadata:
                 is_phi = True
-                reason.append("fallback:unclassified_text")
+                reason.append("cross_verify:ner_corroborated_pii")
             else:
+                # Discard generic NER false-positives on medical findings / anatomy
                 is_phi = False
-                reason.append("fallback:numeric_non_phi")
+                reason.append("cross_verify:unverified_ner_discarded_clinical_kept")
 
+        # Rule 5: Default Fallback — Everything else is KEPT!
+        else:
+            is_phi = False
+            reason.append("cross_verify:clinical_or_non_pii_kept")
 
         if is_phi:
             log.info(f"    REDACT ({', '.join(reason)}): '{text}' @ {bbox}")
             phi_regions.append({"text": text, "bbox": bbox})
         else:
-            log.info(f"    KEEP ({', '.join(reason) if reason else 'unclassified'}): '{text}' @ {bbox}")
+            log.info(f"    KEEP ({', '.join(reason)}): '{text}' @ {bbox}")
 
     return phi_regions

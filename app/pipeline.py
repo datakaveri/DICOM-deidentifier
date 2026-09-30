@@ -152,19 +152,19 @@ def anonymize_dicom_file(input_path, before_output_path, output_path,
         raw_det = raw_det + full_det
         log.info(f"            Combined raw detections: {len(raw_det)}")
 
-        # ── Stage 4: Classify ─────────────────────────────────────────────────
-        log.info("  [Stage 4] Classifying detections (PHI vs clinical)...")
-        merged     = merge_detections(raw_det)
+        # ── Stage 4: Metadata Cross-Verification & Classification ────────────
+        log.info("  [Stage 4] Cross-verifying OCR text against DICOM metadata PII...")
+        stored_values = load_original_tag_values(data_snapshot_path)
+        merged = merge_detections(raw_det)
         phi_regions = classify_phi(
             merged, ocr_frame.shape, analyzer, gliner_model, medical_ner, deid_model,
-            fallback_medical_ner=fallback_medical_ner, indian_ner=indian_ner
+            fallback_medical_ner=fallback_medical_ner, indian_ner=indian_ner,
+            metadata_values=stored_values
         )
         phi_regions = expand_phi_blocks(merged, phi_regions, ocr_frame.shape)
         log.info(f"            PHI regions to redact: {len(phi_regions)}")
 
-        # ── Step 3: match OCR text against the full original-tag backup ────────
-        log.info("  [Step 3] Cross-checking OCR text against data.json (original tag values)...")
-        stored_values = load_original_tag_values(data_snapshot_path)
+        # Safety-net tag match pass
         tag_matches = match_against_stored_tags(merged, stored_values, ocr_frame.shape)
         existing_bboxes = [r["bbox"] for r in phi_regions]
         added = 0
@@ -173,7 +173,8 @@ def anonymize_dicom_file(input_path, before_output_path, output_path,
                 phi_regions.append(m)
                 existing_bboxes.append(m["bbox"])
                 added += 1
-        log.info(f"            Additional regions matched to stored tags: {added}")
+        if added:
+            log.info(f"            Additional regions matched to stored tags: {added}")
 
         audit["redacted_regions"] = [
             {"text": r["text"], "bbox": r["bbox"]} for r in phi_regions

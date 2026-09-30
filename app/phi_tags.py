@@ -106,15 +106,14 @@ def dump_original_tags(ds: pydicom.Dataset, path: str) -> None:
 
 def load_original_tag_values(path: str) -> list:
     """
-    Loads the full original-tag backup (data.json, written by
-    dump_original_tags() before anything runs) and returns the values to
-    match burned-in OCR text against.
+    Loads the full original-tag backup (data.json) and extracts all ground-truth
+    demographic and identifier PII values to cross-verify burned-in OCR text against.
     
-    Includes comprehensive DICOM normalization:
-      - Person Names (PN): 'MEYER^STEPHANIE' -> 'MEYER STEPHANIE', 'STEPHANIE MEYER',
-        and individual parts 'MEYER', 'STEPHANIE'.
-      - Dates (DA): '19530716' -> '07.16.1953', '16.07.1953', '07/16/1953', '16/07/1953', etc.
-      - Identifiers: PatientID, AccessionNumber, etc.
+    Targeted DICOM Metadata PII Fields:
+      - Person Names: PatientName, ReferringPhysicianName, PhysiciansOfRecord, OperatorsName, InstitutionName
+      - Identifiers: PatientID, OtherPatientIDs, AccessionNumber, StudyID, StationName
+      - Dates: PatientBirthDate, StudyDate, SeriesDate, AcquisitionDate
+      - Demographics: PatientAddress, PatientAge, PatientTelephoneNumbers
     """
     if not os.path.exists(path):
         return []
@@ -122,36 +121,51 @@ def load_original_tag_values(path: str) -> list:
     with open(path, "r") as f:
         snapshot = json.load(f)
 
+    pii_keywords = {
+        "patientname", "referringphysicianname", "physiciansofrecord", "operatorsname",
+        "nameofphysiciansreadingstudy", "institutionname", "institutionaldepartmentname",
+        "stationname", "patientid", "otherpatientids", "accessionnumber", "studyid",
+        "patientbirthdate", "studydate", "seriesdate", "acquisitiondate", "patientaddress",
+        "patienttelephonenumbers", "patientage"
+    }
+
     values = set()
     for entry in snapshot:
         val = (entry.get("value") or "").strip()
-        keyword = entry.get("keyword", "")
+        keyword = entry.get("keyword", "").lower()
         vr = entry.get("vr", "")
-        if not val or val == "None" or len(val) < 3:
+        if not val or val == "None" or len(val) < 2:
             continue
-        if vr == "UI" or keyword.endswith("UID"):
+        if vr == "UI" or keyword.endswith("uid"):
             continue
-        if _is_clinical(val):
+
+        # Check if keyword is a PHI attribute or VR is PN/DA/AS
+        is_phi_attr = (
+            keyword in pii_keywords
+            or vr in ("PN", "DA")
+            or any(k in keyword for k in ["patient", "physician", "doctor", "hospital", "institution", "address"])
+        )
+        if not is_phi_attr:
             continue
 
         values.add(val)
 
         # Handle DICOM Person Names (PN VR or keyword ending with Name)
-        if vr == "PN" or keyword.endswith("Name") or "^" in val:
+        if vr == "PN" or "name" in keyword or "^" in val:
             # Replace carets with spaces
             clean_name = val.replace("^", " ").strip()
-            if clean_name and len(clean_name) >= 3 and not _is_clinical(clean_name):
+            if clean_name and len(clean_name) >= 3:
                 values.add(clean_name)
                 parts = clean_name.split()
                 if len(parts) >= 2:
                     # Also add reversed name ("STEPHANIE MEYER")
                     values.add(" ".join(reversed(parts)))
                 for part in parts:
-                    if len(part) >= 3 and not _is_clinical(part):
+                    if len(part) >= 3:
                         values.add(part)
 
         # Handle DICOM Dates (YYYYMMDD)
-        if (vr == "DA" or keyword.endswith("Date")) and len(val) == 8 and val.isdigit():
+        if (vr == "DA" or "date" in keyword) and len(val) == 8 and val.isdigit():
             yyyy = val[:4]
             mm = val[4:6]
             dd = val[6:8]
@@ -168,9 +182,8 @@ def load_original_tag_values(path: str) -> list:
 
 def match_against_stored_tags(merged, stored_values, image_shape):
     """
-    Step 3: cross-checks OCR-detected burned-in text against the PHI tag
-    values identify_phi_tags() found in Step 1 -- e.g. this file's actual
-    PatientName, PatientID, InstitutionName, dates, etc.
+    Cross-checks OCR-detected burned-in text directly against the ground-truth
+    DICOM metadata PII values (PatientName, PatientID, InstitutionName, dates, etc.).
     """
     if not stored_values:
         return []
@@ -183,14 +196,12 @@ def match_against_stored_tags(merged, stored_values, image_shape):
         text = det["text"].strip()
         if not text or len(text) < 3:
             continue
-        if _is_clinical(text):
-            continue
 
         norm_text = text.upper()
         # Clean alphanumeric tokens from the OCR text
-        tokens = [t for t in re.findall(r'[A-Z0-9]+', norm_text) if len(t) >= 3 and not _is_clinical(t)]
+        tokens = [t for t in re.findall(r'[A-Z0-9]+', norm_text) if len(t) >= 3]
 
-        # Check full substring matches
+        # Check full substring matches against metadata PII
         hit = any(
             norm_text == sv or (len(sv) >= 4 and sv in norm_text) or (len(norm_text) >= 4 and norm_text in sv)
             for sv in normalized_stored
@@ -207,7 +218,7 @@ def match_against_stored_tags(merged, stored_values, image_shape):
             continue
 
         bbox = det["bbox"]
-        log.info(f"    REDACT-TAG-MATCH: '{text}' matches stored original tag value")
+        log.info(f"    REDACT-TAG-MATCH: '{text}' matches stored original metadata PII")
         matches.append({"text": text, "bbox": bbox})
 
     return matches
