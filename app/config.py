@@ -155,6 +155,8 @@ PII_PATTERNS = {
     "age_sex":         r'\b\d{1,3}\s*[/]\s*[MFO]\b',
     "name_prefix":     r'(?i)\b(?:DR\.?|MR\.?|MRS\.?|MS\.?|SHRI|SMT|S/O|D/O|W/O|KUMAR|KUMARI)\b',
     "accession":       r'(?i)\b(?:ACC|ACCNO|ACCESSION)[\s:.-]?\w+\b',
+    "bracket_gender":  r'\[\s*[MFmf]\s*\]|\(\s*[MFmf]\s*\)',
+    "patient_header":  r'\b[A-Za-z]{2,}(?:\s+[A-Za-z]{2,})+\s*(?:\[[MFmf]\]|\([MFmf]\))',
 }
 
 

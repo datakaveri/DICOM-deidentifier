@@ -78,23 +78,7 @@ def _iou(a, b):
 
 
 def _is_pure_clinical_fast(text):
-    val = text.strip().upper()
-    if not val:
-        return True
-    if re.match(r'^(?:L|R|LT|RT|LA|RA|LP|RP|PA|AP|LL|RL|A|P)\s*\d{0,3}$', val):
-        return True
-    if val in CLINICAL_ALLOWLIST or val in {"L26", "R26", "L1", "R1", "L2", "R2", "CXR"}:
-        return True
-    tokens = re.findall(r'[A-Z0-9]+', val)
-    if tokens:
-        expanded_safe = CLINICAL_ALLOWLIST.union({
-            "ANTEROPOSTERIOR", "POSTEROANTERIOR", "ANIIEROPOSTERIOR", "ANIIEROPAOSIIERIORR",
-            "PROJECTION", "ANTERIOR", "POSTERIOR", "ERECT", "SUPINE", "CHEST", "PORTABLE",
-            "L26", "R26", "L12", "R12", "CXR"
-        })
-        if all(t in expanded_safe or re.match(r'^(?:L|R|C|T|S)\d{1,2}$', t) for t in tokens):
-            return True
-    return False
+    return _is_clinical(text)
 
 
 def merge_horizontal_lines(detections, max_gap_factor=2.5, min_v_overlap=0.45):
@@ -241,23 +225,43 @@ def expand_phi_blocks(merged, phi_regions, image_shape):
 
     h, w = image_shape[:2]
     boxes = [d["bbox"] for d in merged]
-    order = sorted(range(len(boxes)), key=lambda i: boxes[i][1])
+    n = len(boxes)
 
+    # Connected-component graph clustering for multi-line column blocks
+    # Prevents distant detections (e.g. on opposite side of image) from splitting clusters
+    adj = {i: [] for i in range(n)}
+    for i in range(n):
+        b1 = boxes[i]
+        w1 = max(1, b1[2] - b1[0])
+        h1 = max(1, b1[3] - b1[1])
+        for j in range(i + 1, n):
+            b2 = boxes[j]
+            w2 = max(1, b2[2] - b2[0])
+            h2 = max(1, b2[3] - b2[1])
+            x_overlap = max(0, min(b1[2], b2[2]) - max(b1[0], b2[0]))
+            min_w = min(w1, w2)
+            if min_w > 0 and (x_overlap / min_w) >= 0.25:
+                v_gap = max(0, max(b1[1], b2[1]) - min(b1[3], b2[3]))
+                max_h = max(h1, h2)
+                if v_gap <= max(45, int(1.8 * max_h)):
+                    adj[i].append(j)
+                    adj[j].append(i)
+
+    visited = set()
     clusters = []
-    current = [order[0]]
-    for idx in order[1:]:
-        prev_box, box = boxes[current[-1]], boxes[idx]
-        prev_h = prev_box[3] - prev_box[1]
-        gap = box[1] - prev_box[3]
-        x_overlap = max(0, min(prev_box[2], box[2]) - max(prev_box[0], box[0]))
-        min_w = min(prev_box[2] - prev_box[0], box[2] - box[0])
-        overlap_ratio = x_overlap / min_w if min_w > 0 else 0
-        if gap <= 1.8 * max(prev_h, 1) and overlap_ratio >= 0.3:
-            current.append(idx)
-        else:
-            clusters.append(current)
-            current = [idx]
-    clusters.append(current)
+    for i in range(n):
+        if i not in visited:
+            comp = []
+            queue = [i]
+            visited.add(i)
+            while queue:
+                curr = queue.pop(0)
+                comp.append(curr)
+                for neighbor in adj[curr]:
+                    if neighbor not in visited:
+                        visited.add(neighbor)
+                        queue.append(neighbor)
+            clusters.append(comp)
 
     phi_bboxes = {tuple(r["bbox"]) for r in phi_regions}
     added = 0
@@ -279,9 +283,46 @@ def expand_phi_blocks(merged, phi_regions, image_shape):
                     phi_regions.append({"text": sibling_text, "bbox": list(b)})
                     phi_bboxes.add(b)
                     added += 1
+
+        # If this cluster contains PHI, align its left edge so truncated words at the margin are fully covered
+        if has_phi or all_phi:
+            min_cluster_x = min(boxes[i][0] for i in cluster)
+            max_cluster_x2 = max(boxes[i][2] for i in cluster)
+            target_x = max(0, min_cluster_x - 35) if min_cluster_x < 150 else min_cluster_x
+
+            # Bridge vertical gaps in multi-line PHI blocks where OCR missed intermediate lines
+            sorted_cluster = sorted(cluster, key=lambda idx: boxes[idx][1])
+            for c_i in range(len(sorted_cluster) - 1):
+                top_box = boxes[sorted_cluster[c_i]]
+                bot_box = boxes[sorted_cluster[c_i + 1]]
+                gap_y1 = top_box[3]
+                gap_y2 = bot_box[1]
+                gap_h = gap_y2 - gap_y1
+                # If there is a small gap (1 to 35px) between consecutive PHI lines
+                if 0 < gap_h <= 35:
+                    bridge_x1 = min(top_box[0], bot_box[0])
+                    bridge_x2 = max(top_box[2], bot_box[2])
+                    bridge_bbox = [bridge_x1, gap_y1, bridge_x2, gap_y2]
+                    # Ensure no confirmed clinical text is inside this gap
+                    if not any(_is_clinical(m["text"]) and _containment(bridge_bbox, m["bbox"]) > 0.5 for m in merged):
+                        phi_regions.append({"text": "[gap_bridge]", "bbox": bridge_bbox})
+                        phi_bboxes.add(tuple(bridge_bbox))
+                        added += 1
+
+            for r in phi_regions:
+                b_curr = tuple(r["bbox"])
+                if b_curr in cluster_bboxes or any(_containment(r["bbox"], boxes[i]) > 0.6 for i in cluster):
+                    r["bbox"][0] = min(r["bbox"][0], target_x)
+                    r["bbox"][2] = min(w, r["bbox"][2] + 8)
+                    r["bbox"][1] = max(0, r["bbox"][1] - 3)
+                    r["bbox"][3] = min(h, r["bbox"][3] + 3)
+                    # Extend truncated lines in demographic blocks at margin
+                    if (r["bbox"][2] - r["bbox"][0]) < 0.60 * (max_cluster_x2 - min_cluster_x) and max_cluster_x2 > 300:
+                        r["bbox"][2] = min(w, max(r["bbox"][2], int(max_cluster_x2 * 0.90)))
     if added:
         log.info(f"    Block-expand: redacting {added} additional sibling line(s) in flagged text blocks")
     return phi_regions
+
 
 
 def _is_clinical(text):
@@ -290,17 +331,35 @@ def _is_clinical(text):
         return True
         
     clean = re.sub(r'[^A-Z0-9]', '', val)
-    if clean in CLINICAL_ALLOWLIST or clean in {"L26", "R26", "L1", "R1", "L2", "R2", "L3", "R3"}:
+    if clean in CLINICAL_ALLOWLIST or clean in {"L26", "R26", "L1", "R1", "L2", "R2", "L3", "R3", "CXR"}:
         return True
+
+    # Demographics check — if it carries demographic markers, it is NOT pure clinical
+    demog_markers = ["PATIENT", "NAME", "DOB", "D0B", "DR.", "DOCTOR", "PHYSICIAN", "HOSPITAL", "CLINIC", "MRN", "PID", "UHID", "AGE", "SEX"]
+    if any(m in val for m in demog_markers):
+        return False
 
     tokens = re.findall(r'[A-Z0-9]+', val)
     if tokens:
         expanded_safe = CLINICAL_ALLOWLIST.union({
             "ANTEROPOSTERIOR", "POSTEROANTERIOR", "ANIIEROPOSTERIOR", "ANIIEROPAOSIIERIORR",
             "PROJECTION", "ANTERIOR", "POSTERIOR", "ERECT", "SUPINE", "CHEST", "PORTABLE",
-            "L26", "R26", "L12", "R12"
+            "L26", "R26", "L12", "R12", "CXR", "NORMAL", "CLEAR", "COSTOPHRENIC", "ANGLES",
+            "SHARP", "RECESSES", "SULCI", "CARDIOMEGALY", "EFFUSION", "VERTEBRAE", "TRACHEA",
+            "MIDLINE", "CENTRAL", "PULMONARY", "INFILTRATE", "AORTIC", "KNOB", "ELONGATION",
+            "BRONCHOVASCULAR", "SILHOUETTE", "EXPANDED", "PNEUMOTHORAX", "MEDIASTINAL",
+            "MEDIASTINUM", "RADIOGRAPH", "BONY", "CAGE", "INTACT", "VASCULATURE", "RETICULAR",
+            "OPACITIES", "OPACITY", "CARDIOTHORACIC", "RATIO", "PLEURA", "BLUNTING", "CP",
+            "ANGLE", "LESION", "PARENCHYMA", "INFILTRATION", "DIAPHRAGMATIC", "OUTLINES",
+            "TB", "TUBERCULOSIS", "THORACIC", "SKELETON", "HYPERINFLATED", "RETICULONODULAR",
+            "ACUTE", "CONSOLIDATION", "PATTERN", "BILATERAL", "EXAMINATION", "STUDY", "VIEW",
+            "KVP", "MAS", "SID", "CM"
         })
-        if all(t in expanded_safe or re.match(r'^(?:L|R|C|T|S)\d{1,2}$', t) for t in tokens):
+        # If all tokens or a majority of clinical keywords match
+        if all(t in expanded_safe or re.match(r'^(?:L|R|C|T|S|D)\d{0,2}$', t) or re.match(r'^\d{1,4}$', t) for t in tokens):
+            return True
+        clinical_matches = sum(1 for t in tokens if t in expanded_safe)
+        if clinical_matches >= 2 and (clinical_matches / len(tokens)) >= 0.5:
             return True
         
     return False
@@ -404,18 +463,18 @@ def classify_phi(merged, image_shape, analyzer=None, gliner_model=None, medical_
         # Signal C: Regex PII Patterns & Demographic Labels
         regex_reasons = []
         generic_demographic_labels = [
-            "NAME", "PATIENT", "DATE", "DOB", "D0B", "0B:", "BIRTH", "MRN", "UHID", "PID", "AGE", "SEX", "GENDER",
-            "MALE", "FEMALE", "DR.", "DOCTOR", "PHYSICIAN", "HOSPITAL", "HOSP", "CLINIC", "INSTITUT",
-            "CONFIDENTIAL", "CONFIDCNTTIAC", "RESTRICTED", "PROPRIETARY", "SECRET"
+            "NAME", "PATIENT", "ATIENT", "TIENT", "DATE", "DOB", "D0B", "0B:", "BIRTH", "MRN", "UHID", "PID", "AGE", "SEX", "GENDER",
+            "MALE", "FEMALE", "DR.", "DOCTOR", "PHYSICIAN", "HOSPITAL", "OSPITAL", "SPITAL", "HOSP", "CLINIC", "INSTITUT",
+            "CONFIDENTIAL", "FIDENTIAL", "IDENTIAL", "DENTIAL", "CONFID", "CONFIDCNTTIAC", "MEDICAL RECORD", "RESTRICTED", "PROPRIETARY", "SECRET"
         ]
         has_id_label = bool(re.search(r'\bID\b', val_upper))
+        has_gender_bracket = bool(re.search(r'\[\s*[MF]\s*\]|\(\s*[MF]\s*\)', val_upper))
         if val_upper not in NON_PII_EXCLUSIONS:
-            has_demographic_label = any(label in val_upper for label in generic_demographic_labels) or has_id_label
+            has_demographic_label = any(label in val_upper for label in generic_demographic_labels) or has_id_label or has_gender_bracket
             if has_demographic_label:
                 regex_reasons.append("regex:demographic_label")
         else:
             has_demographic_label = False
-
         for pat_name, pat_regex in PII_PATTERNS.items():
             if re.search(pat_regex, clean_text, re.IGNORECASE):
                 regex_reasons.append(f"regex:pii_pattern_{pat_name}")

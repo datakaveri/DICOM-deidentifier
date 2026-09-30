@@ -117,22 +117,40 @@ def anonymize_dicom_file(input_path, before_output_path, output_path,
         # ── Stage 2: Text region detection (shape-based, no OCR) ──────────────
         log.info("  [Stage 2] Detecting candidate text regions...")
         text_regions = detect_text_regions(ocr_frame)
-        log.info(f"            Candidate regions: {len(text_regions)}")
+        
+        # Burned-in PHI headers and footers almost always appear in the top or bottom margins.
+        # Add high-resolution margin bands as guaranteed candidates if bright pixels exist,
+        # so small edge text (e.g. Patient Name / DOB at row 0) is never lost to full-image downscaling.
+        frame_h, frame_w = ocr_frame.shape[:2]
+        margin_h = max(60, int(frame_h * 0.12))
+        top_crop = ocr_frame[:margin_h, :]
+        if top_crop.size > 0 and int(top_crop.max()) >= 80:
+            text_regions.append([0, 0, frame_w, margin_h])
+        bottom_crop = ocr_frame[frame_h - margin_h:, :]
+        if bottom_crop.size > 0 and int(bottom_crop.max()) >= 80:
+            text_regions.append([0, frame_h - margin_h, frame_w, frame_h])
+
+        log.info(f"            Candidate regions (including margin bands): {len(text_regions)}")
 
         # ── Stage 3: OCR ──────────────────────────────────────────────────────
-        # Run PaddleOCR on cropped text regions only (not the full image).
-        # This is dramatically faster because it processes small crops
-        # instead of the entire DICOM pixel array.
-        log.info("  [Stage 3] Running OCR on detected text regions (region-based mode)...")
+        # Two-pass OCR strategy:
+        #   Pass 1 (Region-based): Fast, runs PaddleOCR on cropped candidate regions.
+        #   Pass 2 (Full-image):   Safety net — catches text that the shape-based
+        #                          detector in Stage 2 missed entirely (e.g. text
+        #                          at the very top/bottom pixel rows, or text over
+        #                          complex anatomy that didn't form clean blobs).
+        # Both passes are merged via NMS dedup in Stage 4.
+        log.info("  [Stage 3] Running OCR — dual-pass (region-based + full-image)...")
         raw_det = detect_text_in_regions(ocr_frame, text_regions, paddle_ocr=paddle_ocr, run_on_regions=True)
+        log.info(f"            Region-based OCR detections: {len(raw_det)}")
 
-        # Fallback: if region-based mode found nothing but we have candidate
-        # regions, run full-image mode as a safety net.
-        if not raw_det and text_regions:
-            log.info("  [Stage 3] Region-based OCR found nothing — falling back to full-image mode...")
-            raw_det = detect_text_in_regions(ocr_frame, text_regions, paddle_ocr=paddle_ocr, run_on_regions=False)
+        # Pass 2: Full-image OCR (always run as safety net)
+        full_det = detect_text_in_regions(ocr_frame, text_regions, paddle_ocr=paddle_ocr, run_on_regions=False)
+        log.info(f"            Full-image OCR detections: {len(full_det)}")
 
-        log.info(f"            Raw detections: {len(raw_det)}")
+        # Merge both passes — NMS dedup in merge_detections() will handle overlaps
+        raw_det = raw_det + full_det
+        log.info(f"            Combined raw detections: {len(raw_det)}")
 
         # ── Stage 4: Classify ─────────────────────────────────────────────────
         log.info("  [Stage 4] Classifying detections (PHI vs clinical)...")
@@ -227,6 +245,8 @@ def anonymize_dicom_file(input_path, before_output_path, output_path,
                 preview_8 = np.clip((vis_source - pmin) / (pmax - pmin) * 255.0, 0, 255).astype(np.uint8)
             else:
                 preview_8 = vis_source.astype(np.uint8)
+            if is_monochrome1:
+                preview_8 = 255 - preview_8
             import cv2
             preview_p = os.path.join(os.path.dirname(output_path), "after_preview.png")
             cv2.imwrite(preview_p, preview_8)

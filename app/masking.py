@@ -77,15 +77,28 @@ def _apply_inverse_voi_lut(visual_pixels, ds, original_raw_pixels):
     return raw.astype(original_raw_pixels.dtype)
 
 
+def _fill_mask_holes(mask):
+    """
+    Fills interior holes inside character loops (e.g. inside O, D, R, A, 0, B)
+    so OpenCV inpainting never samples dark interior stroke outlines.
+    """
+    cnts, hier = cv2.findContours(mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+    filled = mask.copy()
+    if hier is not None:
+        for i, h in enumerate(hier[0]):
+            if h[3] != -1:  # Enclosed hole contour
+                cv2.drawContours(filled, cnts, i, 255, -1)
+    return filled
+
+
 def _get_character_mask(roi_8bit, bbox_local=None, dilation_px=2):
     """
-    Tri-Signal Character Stroke Segmentation.
-    Combines:
-      1. Top-Hat High-Pass (bright text cores)
-      2. Local Relative Contrast Thresholding
-      3. Drop-Shadow / Dark Outline Capture (for stroked clinical fonts)
-      4. Anti-Aliased Ellipse Dilation
-    Captures complete glyphs without capturing background tissue or anatomy.
+    Dual-Polarity Character Stroke Segmentation with Hole Sealing.
+    Accurately isolates characters across all contrast environments:
+      1. Bright text on darker background (Top-Hat high pass)
+      2. Dark text on bright background (Black-Hat high pass)
+      3. Drop-shadows and dark outlines
+      4. Interior hole sealing preventing dark pinhole artifacts.
     """
     h, w = roi_8bit.shape[:2]
 
@@ -102,74 +115,106 @@ def _get_character_mask(roi_8bit, bbox_local=None, dilation_px=2):
     if crop_h < 3 or crop_w < 3:
         return np.zeros((h, w), dtype=np.uint8)
 
-    try:
-        denoised = cv2.bilateralFilter(crop, d=5, sigmaColor=15.0, sigmaSpace=3.0)
-    except Exception:
-        denoised = crop.copy()
+    # 7x7 Top-hat (bright strokes) & Black-hat (dark strokes / outlines)
+    k_hat = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
+    th = cv2.morphologyEx(crop, cv2.MORPH_TOPHAT, k_hat)
+    bh = cv2.morphologyEx(crop, cv2.MORPH_BLACKHAT, k_hat)
 
-    k_size = max(5, min(15, (crop_h // 2) | 1))
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k_size, k_size))
-    tophat = cv2.morphologyEx(denoised, cv2.MORPH_TOPHAT, kernel)
-    _, mask_bright = cv2.threshold(tophat, 10, 255, cv2.THRESH_BINARY)
+    # Sensitive threshold range (4 to 10) ensures faint / ghosted text is also captured
+    th_t = max(4, min(10, int(np.percentile(th, 90) * 0.22)))
+    bh_t = max(4, min(10, int(np.percentile(bh, 90) * 0.22)))
 
-    bg_med = float(np.median(crop))
-    crop_max = float(np.max(crop))
-    if crop_max > bg_med + 12.0:
-        t_contrast = bg_med + 0.25 * (crop_max - bg_med)
-        _, mask_contrast = cv2.threshold(crop, min(245.0, t_contrast), 255, cv2.THRESH_BINARY)
-    else:
-        mask_contrast = np.zeros_like(crop)
+    box_mask = ((th > th_t) | (bh > bh_t)).astype(np.uint8) * 255
 
-    stroke_union = cv2.bitwise_or(mask_bright, mask_contrast)
+    # Seal interior pinholes inside character loops
+    box_mask = _fill_mask_holes(box_mask)
 
-    # ── Shadow / Dark Outline Capture ────────────────────────────────────────
-    # Medical burned-in text commonly features an anti-aliased black border/outline
-    # (near 0) around white characters. Including it in the mask prevents Navier-Stokes
-    # from propagating dark border pixels into the character center.
-    k_near = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    stroke_dil_near = cv2.dilate(stroke_union, k_near)
-    shadow_thresh = min(30, max(5, int(bg_med * 0.4)))
-    mask_shadow = (crop < shadow_thresh) & (stroke_dil_near > 0)
-    stroke_union = cv2.bitwise_or(stroke_union, (mask_shadow.astype(np.uint8) * 255))
-
-    # Morphological closing to seal pinhole gaps between strokes & shadow
-    k_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    stroke_union = cv2.morphologyEx(stroke_union, cv2.MORPH_CLOSE, k_close)
-
-    # Elliptical dilation covers anti-aliasing without blurring adjacent letters
-    k_dil_size = max(3, min(5, dilation_px * 2 + 1))
+    # Anti-aliased elliptical dilation covers stroke boundaries and anti-aliasing halo
+    k_dil_size = max(5, min(9, dilation_px * 2 + 1))
     k_dil = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_dil_size, k_dil_size))
-    dilated = cv2.dilate(stroke_union, k_dil, iterations=1)
+    dilated = cv2.dilate(box_mask, k_dil, iterations=1)
+
+    # Safety: if very faint text, supplement with morphological gradient
+    if np.sum(dilated > 0) < int(crop_h * crop_w * 0.04):
+        grad = cv2.morphologyEx(crop, cv2.MORPH_GRADIENT, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)))
+        g_t = max(6, int(np.percentile(grad, 90) * 0.30))
+        grad_mask = ((grad > g_t).astype(np.uint8) * 255)
+        grad_mask = cv2.dilate(grad_mask, k_dil, iterations=1)
+        dilated = cv2.bitwise_or(dilated, grad_mask)
+
+    # Snap character strokes touching outer image boundaries so no tick residue remains
+    if by1 == 0:
+        top_active = np.any(dilated[0:min(8, crop_h), :] > 0, axis=0)
+        dilated[0:min(6, crop_h), top_active] = 255
+    if bx1 == 0:
+        left_active = np.any(dilated[:, 0:min(8, crop_w)] > 0, axis=1)
+        dilated[left_active, 0:min(6, crop_w)] = 255
+    if by2 >= h:
+        bot_active = np.any(dilated[max(0, crop_h - 8):crop_h, :] > 0, axis=0)
+        dilated[max(0, crop_h - 6):crop_h, bot_active] = 255
+    if bx2 >= w:
+        right_active = np.any(dilated[:, max(0, crop_w - 8):crop_w] > 0, axis=1)
+        dilated[right_active, max(0, crop_w - 6):crop_w] = 255
 
     full_mask = np.zeros((h, w), dtype=np.uint8)
     full_mask[by1:by2, bx1:bx2] = dilated
     return full_mask
 
 
-def _inpaint_16bit(image_16, mask_8, radius=9, method=cv2.INPAINT_NS):
+def _inpaint_16bit(image_16, mask_8, radius=5, method=cv2.INPAINT_TELEA):
     """
-    Runs cv2.inpaint on 16-bit or signed pixel arrays by scaling to 8-bit,
-    inpainting, and scaling back smoothly.
+    High-fidelity inpainting for 16-bit and integer pixel arrays.
+    Scales to 8-bit using the dynamic range of the UNMASKED BACKGROUND
+    (mask_8 == 0) rather than the bright text spikes. Only the masked stroke
+    pixels are replaced, ensuring original unmasked tissue is preserved
+    at full 16-bit precision with zero quantization smudging.
     """
-    raw_min = float(image_16.min())
-    raw_max = float(image_16.max())
-    if raw_max > raw_min:
-        temp_8 = ((image_16.astype(np.float32) - raw_min) / (raw_max - raw_min) * 255.0).astype(np.uint8)
-        inpainted_8 = cv2.inpaint(temp_8, mask_8, radius, method)
-        result = (
-            inpainted_8.astype(np.float32) / 255.0 * (raw_max - raw_min) + raw_min
-        ).astype(image_16.dtype)
-    else:
+    bg_mask = (mask_8 == 0)
+    if not np.any(bg_mask):
+        return image_16
+
+    bg_pixels = image_16[bg_mask]
+    bg_min = float(np.percentile(bg_pixels, 0.5))
+    bg_max = float(np.percentile(bg_pixels, 99.5))
+
+    if bg_max <= bg_min:
+        bg_min = float(bg_pixels.min())
+        bg_max = float(bg_pixels.max())
+
+    if bg_max <= bg_min:
         result = image_16.copy()
+        result[mask_8 > 0] = int(bg_min)
+        return result
+
+    # Normalize image based on background dynamic range
+    temp_8 = np.clip((image_16.astype(np.float32) - bg_min) / (bg_max - bg_min) * 255.0, 0, 255).astype(np.uint8)
+
+    inpainted_8 = cv2.inpaint(temp_8, mask_8, radius, method)
+
+    result = image_16.copy()
+    update_mask = (mask_8 > 0)
+    result[update_mask] = (
+        inpainted_8[update_mask].astype(np.float32) / 255.0 * (bg_max - bg_min) + bg_min
+    ).astype(image_16.dtype)
     return result
 
 
-def redact_roi(cleaned, x1, y1, x2, y2, pad=10):
+def redact_roi(cleaned, x1, y1, x2, y2, pad=14):
     """
-    Unified character-stroke level inpainting with Navier-Stokes neighbor reconstruction.
-    Applied uniformly to all regions (anatomy and border alike).
+    Unified character-stroke level inpainting with neighbor gradient reconstruction.
+    Applied uniformly to all regions (soft tissue, anatomy, and margins alike).
     """
     h, w = cleaned.shape[:2]
+    # Edge boundary snap: if box is within 14px of image border, snap cleanly to border
+    if y1 <= 14:
+        y1 = 0
+    if x1 <= 14:
+        x1 = 0
+    if y2 >= h - 14:
+        y2 = h
+    if x2 >= w - 14:
+        x2 = w
+
     rx1, rx2 = max(0, x1 - pad), min(w, x2 + pad)
     ry1, ry2 = max(0, y1 - pad), min(h, y2 + pad)
 
@@ -179,6 +224,8 @@ def redact_roi(cleaned, x1, y1, x2, y2, pad=10):
         return cleaned
 
     roi_min, roi_max = float(roi.min()), float(roi.max())
+
+    # ── High-Fidelity Character-Stroke Inpainting ──────────────────────────
     if roi_max > roi_min:
         roi_8 = ((roi.astype(np.float32) - roi_min) / (roi_max - roi_min) * 255.0).astype(np.uint8)
     else:
@@ -194,14 +241,32 @@ def redact_roi(cleaned, x1, y1, x2, y2, pad=10):
     crop_mask = char_mask[0:roi_h, 0:roi_w]
 
     if not np.any(crop_mask > 0):
-        # Fallback if no distinct strokes: use local median fill in ROI
-        cleaned[y1:y2, x1:x2] = int(np.median(roi))
-        return cleaned
+        # Fallback: Otsu threshold inside the target box to isolate text strokes
+        box_crop = roi_8[iy1:iy2, ix1:ix2]
+        if box_crop.size > 0:
+            _, otsu_t = cv2.threshold(box_crop, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            k_dil = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+            crop_mask[iy1:iy2, ix1:ix2] = cv2.dilate(otsu_t, k_dil, iterations=1)
+        if not np.any(crop_mask > 0):
+            crop_mask[iy1:iy2, ix1:ix2] = 255
 
+    # Guarantee zero boundary residue if region touches image edge
+    if ry1 == 0:
+        crop_mask[0:min(8, roi_h), ix1:ix2] = 255
+    if rx1 == 0:
+        crop_mask[iy1:iy2, 0:min(8, roi_w)] = 255
+    if ry2 == h:
+        crop_mask[max(0, roi_h - 8):roi_h, ix1:ix2] = 255
+    if rx2 == w:
+        crop_mask[iy1:iy2, max(0, roi_w - 8):roi_w] = 255
+
+    inpaint_radius = 5
     if roi.dtype != np.uint8:
-        roi_inpainted = _inpaint_16bit(roi, crop_mask, radius=7, method=cv2.INPAINT_NS)
+        roi_inpainted = _inpaint_16bit(roi, crop_mask, radius=inpaint_radius, method=cv2.INPAINT_TELEA)
     else:
-        roi_inpainted = cv2.inpaint(roi, crop_mask, 7, cv2.INPAINT_NS)
+        temp_inp = cv2.inpaint(roi, crop_mask, inpaint_radius, cv2.INPAINT_TELEA)
+        roi_inpainted = roi.copy()
+        roi_inpainted[crop_mask > 0] = temp_inp[crop_mask > 0]
 
     cleaned[ry1:ry2, rx1:rx2] = roi_inpainted
     return cleaned
@@ -212,10 +277,11 @@ _redact_border_zone = redact_roi
 _redact_anatomy_zone = redact_roi
 
 
-def _cluster_bboxes(regions, margin=8):
+def _cluster_bboxes(regions, margin_x=8, margin_y=2):
     """
-    Clusters overlapping or closely adjacent bounding boxes into unified blocks.
-    Prevents neighboring lines of text from leaking into each other's padding.
+    Clusters horizontally overlapping or closely adjacent bounding boxes on the same line.
+    Preserves clean separation between vertically stacked lines so inpainting interpolates
+    from real tissue immediately above and below each line.
     """
     if not regions:
         return []
@@ -236,7 +302,7 @@ def _cluster_bboxes(regions, margin=8):
                 if visited[j]:
                     continue
                 b2 = boxes[j]
-                e1 = [b1[0] - margin, b1[1] - margin, b1[2] + margin, b1[3] + margin]
+                e1 = [b1[0] - margin_x, b1[1] - margin_y, b1[2] + margin_x, b1[3] + margin_y]
                 if (max(e1[0], b2[0]) < min(e1[2], b2[2]) and
                         max(e1[1], b2[1]) < min(e1[3], b2[3])):
                     b1 = [
@@ -253,9 +319,10 @@ def _cluster_bboxes(regions, margin=8):
     return [{"bbox": b} for b in boxes]
 
 
+
 def redact_pixels(image_array, phi_regions, ds=None):
     """
-    Unified character-stroke level pixel redaction with Navier-Stokes neighbor propagation.
+    Unified character-stroke level pixel redaction with neighbor propagation.
     Applies structure-preserving reconstruction across ALL regions uniformly.
 
     Works on native 8-bit OR 16-bit pixel arrays without losing dynamic range.
@@ -277,8 +344,8 @@ def redact_pixels(image_array, phi_regions, ds=None):
         if (x2 - x1) > 0 and (y2 - y1) > 0:
             combined_mask[y1:y2, x1:x2] = 255
 
-    # Cluster overlapping/adjacent bboxes into unified blocks
-    clusters = _cluster_bboxes(phi_regions, margin=8)
+    # Cluster horizontally adjacent bboxes on same lines (preserving line separation)
+    clusters = _cluster_bboxes(phi_regions, margin_x=8, margin_y=4)
     log.info(f"  [Stage 5] Unified inpainting for {len(clusters)} region block(s)...")
 
     redact_count = 0
@@ -298,3 +365,4 @@ def redact_pixels(image_array, phi_regions, ds=None):
         f"Total pixels masked: {int(np.sum(combined_mask > 0))}"
     )
     return cleaned, combined_mask
+

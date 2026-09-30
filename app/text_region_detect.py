@@ -57,13 +57,8 @@ def _to_grayscale(image):
 
 def _binarize(image):
     """
-    Returns the two foreground masks (255 = candidate text pixel) separately
-    instead of OR-ing them into one mask. Merging pixels before connected-
-    component labeling lets a bridge of adaptive-threshold pixels (e.g. along
-    a background/anatomy boundary) fuse an otherwise-isolated line of
-    characters into one oversized blob, which then fails the char-size filter
-    and silently disappears. Keeping the masks separate and running
-    connected components on each independently avoids that.
+    Returns candidate foreground masks (255 = candidate text pixel) separately
+    for both bright text and dark text across anatomy and margins.
     """
     gray = _to_grayscale(image)
     gray2x = cv2.resize(gray, None, fx=_SCALE, fy=_SCALE, interpolation=cv2.INTER_CUBIC)
@@ -73,15 +68,19 @@ def _binarize(image):
         otsu = cv2.bitwise_not(otsu)
     fg_otsu = cv2.bitwise_not(otsu)
 
-    # Bright-relative-to-its-own-neighborhood pass: catches text sitting over
-    # anatomy, where Otsu's single whole-image threshold sees the text as part
-    # of the same bright class as the surrounding tissue.
+    # Bright-relative-to-its-own-neighborhood pass: catches bright text over anatomy
     fg_adaptive = cv2.adaptiveThreshold(
         gray2x, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY,
         _ADAPTIVE_BLOCK, _ADAPTIVE_C
     )
 
-    return fg_otsu, fg_adaptive
+    # Dark-relative-to-its-own-neighborhood pass: catches dark burned-in text
+    fg_adaptive_dark = cv2.adaptiveThreshold(
+        gray2x, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV,
+        _ADAPTIVE_BLOCK, _ADAPTIVE_C
+    )
+
+    return fg_otsu, fg_adaptive, fg_adaptive_dark
 
 
 def detect_text_regions(image_8bit):
@@ -95,15 +94,15 @@ def detect_text_regions(image_8bit):
     crop_h, crop_w = image_8bit.shape[:2]
 
     gray_check = _to_grayscale(image_8bit)
-    if int(gray_check.max()) < _MIN_PEAK:
+    if int(gray_check.max()) < 20:
         return []
 
-    fg_otsu, fg_adaptive = _binarize(image_8bit)
+    fg_masks = _binarize(image_8bit)
 
     char_boxes = []
     seen = set()
 
-    for fg in (fg_otsu, fg_adaptive):
+    for fg in fg_masks:
         n, _, stats, _ = cv2.connectedComponentsWithStats(fg, connectivity=8)
 
         for i in range(1, n):
@@ -154,37 +153,34 @@ def detect_text_regions(image_8bit):
         if len(line) < _MIN_BLOBS_PER_LINE:
             continue
 
-        y1 = max(0, min(b[1] for b in line) - _PAD_Y)
-        y2 = min(crop_h, max(b[3] for b in line) + _PAD_Y)
+        # Increase vertical padding for reliable OCR capture
+        pad_y = 6
+        y1 = max(0, min(b[1] for b in line) - pad_y)
+        y2 = min(crop_h, max(b[3] for b in line) + pad_y)
 
         row_band = gray_orig[y1:y2, :]
-
+        line_min = int(row_band.min()) if row_band.size > 0 else 0
         line_peak = int(row_band.max()) if row_band.size > 0 else 0
-        if line_peak < _MIN_LINE_PEAK:
-            continue
 
-        # Background sampled only in a margin around this line's blobs, not
-        # the whole row width, so bright anatomy elsewhere in the image can't
-        # sink a line that's genuinely brighter than what's immediately
-        # around it.
+        # Background sampled in a margin around this line's blobs
         line_x1 = min(b[0] for b in line)
         line_x2 = max(b[2] for b in line)
         bg_x1 = max(0, line_x1 - _LOCAL_BG_MARGIN)
         bg_x2 = min(crop_w, line_x2 + _LOCAL_BG_MARGIN)
         local_band = gray_orig[y1:y2, bg_x1:bg_x2]
         bg_mean = float(np.mean(local_band)) if local_band.size > 0 else 0.0
-        if (line_peak - bg_mean) < _MIN_CONTRAST:
+
+        is_edge_margin = (y1 < crop_h * 0.12) or (y2 > crop_h * 0.88)
+        min_contrast = 10 if is_edge_margin else _MIN_CONTRAST
+
+        contrast_bright = line_peak - bg_mean
+        contrast_dark = bg_mean - line_min
+        if max(contrast_bright, contrast_dark) < min_contrast:
             continue
 
-        line_band = gray_orig[y1:y2, bg_x1:bg_x2]
-        bright_cols = np.where(line_band.max(axis=0) > _BRIGHT_THRESHOLD)[0]
-
-        if len(bright_cols) >= 2:
-            x1 = max(0, bg_x1 + int(bright_cols[0]) - _PAD_X)
-            x2 = min(crop_w, bg_x1 + int(bright_cols[-1]) + _PAD_X)
-        else:
-            x1 = max(0, line_x1 - _PAD_X)
-            x2 = min(crop_w, line_x2 + _PAD_X)
+        # Generous horizontal padding prevents truncating the first or last character of a word
+        x1 = max(0, line_x1 - _PAD_X * 2)
+        x2 = min(crop_w, line_x2 + _PAD_X * 2)
 
         results.append([int(x1), int(y1), int(x2), int(y2)])
 
