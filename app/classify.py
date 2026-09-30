@@ -8,7 +8,7 @@ from difflib import SequenceMatcher
 
 import numpy as np
 
-from config import log, CLINICAL_ALLOWLIST, PII_PATTERNS
+from config import log, CLINICAL_ALLOWLIST, PII_PATTERNS, NON_PII_EXCLUSIONS
 
 
 # ── OCR Error Normalization & Fuzzy Clinical Matching ─────────────────────────────────
@@ -306,10 +306,11 @@ def _is_clinical(text):
     return False
 
 
-def classify_phi(merged, image_shape, analyzer=None, gliner_model=None, medical_ner=None, deid_model=None, fallback_medical_ner=None):
+def classify_phi(merged, image_shape, analyzer=None, gliner_model=None, medical_ner=None, deid_model=None, fallback_medical_ner=None, indian_ner=None):
     """
     Classifies each merged detection as PHI (redact) or safe (keep).
-    Uses a 3-Step Hybrid Medical Preservation Stack alongside Stanford De-ID & PII models.
+    Uses Indian Hybrid NER (HiNER + IndicNER + XLM-RoBERTa with Truecasing)
+    alongside Biomedical NER, Clinical allowlists, and Indian PII regex patterns.
     """
     h, w = image_shape[:2]
     phi_regions = []
@@ -376,22 +377,29 @@ def classify_phi(merged, image_shape, analyzer=None, gliner_model=None, medical_
         # Signal A: Clinical Allowlist, Shorthand, & Fuzzy OCR Match (e.g. L26, R12, CHEST, AP, N0RMAL)
         is_clinical_allowlist = _is_clinical(clean_text) or _is_text_pure_clinical(clean_text) or _is_fuzzy_clinical(clean_text)
 
-        # Signal B: General NER (dslim/bert-base-NER) — Person, Location, Organization
-        # Replaces Stanford De-ID which misclassified medical terms (e.g. 'NORMAL' -> 'HOSPITAL').
-        # Uses higher threshold (0.60) to avoid false-positive PHI flags on clinical text.
+        # Signal B: Indian Hybrid NER & General NER — Person, Location, Organization
+        # Evaluates MuRIL (HiNER), IndicNER, and XLM-RoBERTa with Truecasing
         ner_phi_labels = []
-        if deid_model:
+        ner_engine = indian_ner if indian_ner is not None else deid_model
+        if ner_engine:
             try:
-                entities = deid_model(clean_text)
-                for ent in entities:
-                    score = float(ent.get("score", 0.0))
-                    raw_group = str(ent.get("entity_group") or ent.get("entity") or "").strip()
-                    clean_group = re.sub(r'^[BILOU]-', '', raw_group, flags=re.IGNORECASE).upper()
-                    # Only flag PER (patient names), LOC (cities/places), ORG (hospitals) as PHI
-                    if score > 0.60 and clean_group in {"PER", "LOC", "ORG"}:
-                        ner_phi_labels.append(clean_group)
+                if hasattr(ner_engine, "predict_entities"):
+                    entities = ner_engine.predict_entities(clean_text)
+                    for ent in entities:
+                        score = float(ent.get("score", 0.0))
+                        cat = str(ent.get("cat", "")).upper()
+                        if score >= 0.40 and cat in {"PERSON", "LOCATION", "ORGANIZATION", "PER", "LOC", "ORG"}:
+                            ner_phi_labels.append(f"ner_{cat.lower()}")
+                else:
+                    entities = ner_engine(clean_text)
+                    for ent in entities:
+                        score = float(ent.get("score", 0.0))
+                        raw_group = str(ent.get("entity_group") or ent.get("entity") or "").strip()
+                        clean_group = re.sub(r'^[BILOU]-', '', raw_group, flags=re.IGNORECASE).upper()
+                        if score > 0.50 and clean_group in {"PER", "LOC", "ORG", "PERSON", "LOCATION", "ORGANIZATION"}:
+                            ner_phi_labels.append(clean_group)
             except Exception as e:
-                log.debug(f"General NER model error: {e}")
+                log.debug(f"NER model error: {e}")
 
         # Signal C: Regex PII Patterns & Demographic Labels
         regex_reasons = []
@@ -401,9 +409,13 @@ def classify_phi(merged, image_shape, analyzer=None, gliner_model=None, medical_
             "CONFIDENTIAL", "CONFIDCNTTIAC", "RESTRICTED", "PROPRIETARY", "SECRET"
         ]
         has_id_label = bool(re.search(r'\bID\b', val_upper))
-        has_demographic_label = any(label in val_upper for label in generic_demographic_labels) or has_id_label
-        if has_demographic_label:
-            regex_reasons.append("regex:demographic_label")
+        if val_upper not in NON_PII_EXCLUSIONS:
+            has_demographic_label = any(label in val_upper for label in generic_demographic_labels) or has_id_label
+            if has_demographic_label:
+                regex_reasons.append("regex:demographic_label")
+        else:
+            has_demographic_label = False
+
         for pat_name, pat_regex in PII_PATTERNS.items():
             if re.search(pat_regex, clean_text, re.IGNORECASE):
                 regex_reasons.append(f"regex:pii_pattern_{pat_name}")
@@ -418,6 +430,7 @@ def classify_phi(merged, image_shape, analyzer=None, gliner_model=None, medical_
                     presidio_flagged = True
             except Exception:
                 pass
+
 
         # Signal E: Supervised Biomedical NER (Primary: d4data, Fallback: Clinical-AI-Apollo)
         med_ner_labels = []
@@ -511,6 +524,11 @@ def classify_phi(merged, image_shape, analyzer=None, gliner_model=None, medical_
             is_phi = False
             reason.append("clinical:exposure_number")
 
+        # Condition 5.5: Non-PII & Clerical Guard (tokens purely in NON_PII_EXCLUSIONS or CLINICAL_ALLOWLIST or numbers)
+        elif all(t in NON_PII_EXCLUSIONS or t in CLINICAL_ALLOWLIST or re.match(r'^\d+$', t) for t in re.findall(r'[A-Z0-9]+', val_upper)):
+            is_phi = False
+            reason.append("non_pii:clerical_safe")
+
         # Condition 6: Default Fallback
         else:
             if re.search(r'[A-Za-z]', clean_text):
@@ -519,6 +537,7 @@ def classify_phi(merged, image_shape, analyzer=None, gliner_model=None, medical_
             else:
                 is_phi = False
                 reason.append("fallback:numeric_non_phi")
+
 
         if is_phi:
             log.info(f"    REDACT ({', '.join(reason)}): '{text}' @ {bbox}")

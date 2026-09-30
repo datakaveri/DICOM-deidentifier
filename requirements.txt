@@ -17,9 +17,12 @@ paddleocr>=2.8.0
 torch>=2.2.0
 torchvision>=0.17.0
 transformers>=4.40.0
+sentencepiece>=0.1.99
+protobuf>=3.20.2,<6.0.0
 gliner>=0.2.0
 presidio-analyzer>=2.2.354
 spacy>=3.7.4
+
 
 # ── Cryptography & De-Identification ──────────────────────────────────────────
 pycryptodome>=3.20.0

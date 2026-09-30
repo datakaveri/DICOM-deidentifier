@@ -112,14 +112,26 @@ def initialize_engines(use_gpu=False):
     deid_model = None
     if TRANSFORMERS_AVAILABLE:
         try:
-            deid_model = tf_pipeline(
-                "ner",
-                model="dslim/bert-base-NER",
-                aggregation_strategy="simple"
-            )
-            print("  [OK] General NER model (dslim/bert-base-NER) initialized")
+            from indian_ner import IndianHybridNER
+            indian_ner_engine = IndianHybridNER()
+            if indian_ner_engine.is_available():
+                deid_model = indian_ner_engine
+                print("  [OK] Indian Hybrid NER Ensemble (HiNER + IndicNER + XLM-RoBERTa) initialized")
+            else:
+                print("  [INFO] Indian Hybrid NER models not loaded; falling back to dslim/bert-base-NER")
         except Exception as e:
-            print(f"  [WARN] General NER model failed to init: {e}")
+            print(f"  [WARN] Indian Hybrid NER init failed ({e}), falling back to BERT...")
+
+        if deid_model is None:
+            try:
+                deid_model = tf_pipeline(
+                    "ner",
+                    model="dslim/bert-base-NER",
+                    aggregation_strategy="simple"
+                )
+                print("  [OK] General NER model (dslim/bert-base-NER) initialized")
+            except Exception as e:
+                print(f"  [WARN] General NER model failed to init: {e}")
 
     medical_ner = None
     fallback_medical_ner = None
@@ -155,6 +167,7 @@ def initialize_engines(use_gpu=False):
     print(f"[Worker {worker_pid}] All engines ready in {total_init}s\n")
 
     return paddle_ocr, analyzer, deid_model, medical_ner, gliner_model, fallback_medical_ner
+
 
 
 def pre_warm_model_cache(use_gpu=False):
@@ -193,16 +206,25 @@ def pre_warm_model_cache(use_gpu=False):
     if TRANSFORMERS_AVAILABLE:
         try:
             from transformers import AutoTokenizer, AutoModelForTokenClassification
-            for model_name in [
-                "dslim/bert-base-NER",
-                "d4data/biomedical-ner-all",
-                "Clinical-AI-Apollo/Medical-NER",
-            ]:
-                AutoTokenizer.from_pretrained(model_name)
-                AutoModelForTokenClassification.from_pretrained(model_name)
-                print(f"  [CACHED] {model_name}")
+            token = os.getenv("HF_TOKEN") or None
+            models_to_cache = [
+                ("cfilt/HiNER-original-muril-base-cased", False),
+                ("ai4bharat/IndicNER", False),
+                ("Babelscape/wikineural-multilingual-ner", True),
+                ("dslim/bert-base-NER", True),
+                ("d4data/biomedical-ner-all", True),
+                ("Clinical-AI-Apollo/Medical-NER", True),
+            ]
+            for model_name, use_fast in models_to_cache:
+                try:
+                    AutoTokenizer.from_pretrained(model_name, token=token, use_fast=use_fast)
+                    AutoModelForTokenClassification.from_pretrained(model_name, token=token)
+                    print(f"  [CACHED] {model_name}")
+                except Exception as me:
+                    print(f"  [SKIP] Model cache failed for {model_name}: {me}")
         except Exception as e:
             print(f"  [SKIP] Transformers cache failed: {e}")
+
 
     # 3. GLiNER — DISABLED (medical preservation handled by BioNER + expanded allowlist)
     #    Saves ~1.4 GB RAM per worker and ~0.3s classification time per file.

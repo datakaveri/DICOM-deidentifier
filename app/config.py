@@ -129,14 +129,32 @@ CLINICAL_ALLOWLIST = {
     "L26", "R26", "L12", "R12",
 }
 
+# Non-PII exclusions: Common clerical, greeting, or structural tokens that should never be flagged as PHI
+NON_PII_EXCLUSIONS = {
+    "PLS", "PLEASE", "KINDLY", "SIR", "MADAM", "RESPECTED", "REGARDS", "THANKS", "THANKING",
+    "SUBJECT", "SUB", "REF", "GRIEVANCE", "COMPLAINT", "APPLICATION", "REQ", "REQUEST",
+    "S.I.NO", "SL.NO", "SR.NO", "NO", "DATE", "TIME", "STATUS", "REASON", "REMARKS",
+    "SL", "SR", "SI", "MALE", "FEMALE", "OTHER", "TOTAL", "AMOUNT", "PAID", "BALANCE",
+    "कृपया", "महोदय", "महोदया", "विषय", "शिकायत", "आवेदन", "धन्यवाद",
+}
+
 # PII patterns (Indian health context + universal)
 PII_PATTERNS = {
-    "aadhaar":     r'\b\d{4}\s?\d{4}\s?\d{4}\b',
-    "abha":        r'\b\d{2}-\d{4}-\d{4}-\d{4}\b',
-    "phone":       r'\b(?:\+91|0)?[6-9]\d{9}\b',
-    "date":        r'\b\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}\b|\b\d{4}[-/.]\d{1,2}[-/.]\d{1,2}\b',
-    "uhid_mrn":    r'\b(?:UHID|MRN|REG|IPD|OPD|CR|PID|HID)[\s:/-]?\d+\b',
-    "age_sex":     r'\b\d{1,3}\s*[/]\s*[MFO]\b',
-    "name_prefix": r'\b(?:DR\.?|MR\.?|MRS\.?|MS\.?|SHRI|SMT|S/O|D/O|W/O)\b',
-    "accession":   r'\b(?:ACC|ACCNO|ACCESSION)[\s:.-]?\w+\b',
+    "aadhaar":         r'(?<!\d[\s\-])\b[2-9]\d{3}[\s\-]\d{4}[\s\-]\d{4}\b(?!\d|[\s\-]\d)',
+    "pan":             r'\b[A-Z]{5}\d{4}[A-Z]\b',
+    "abha":            r'\b\d{2}-\d{4}-\d{4}-\d{4}\b',
+    "phone":           r'(?i)(?:Phone|Mobile|Contact|Cell|Tel)?[^\n\d]*\b(?:\+91[\s\-]?[6-9]\d{9}|0?[6-9]\d{9})\b',
+    "voter_id":        r'\b(?:[A-Z]{3}\d{7}|[A-Z]{2}\/\d{2}\/\d{3}\/\d{6})\b',
+    "driving_license": r'\b[A-Z]{2}[\-\s]?\d{2,4}[\-\s]?\d{6,11}\b',
+    "vehicle_no":      r'\b[A-Z]{2}[\s\-]?\d{2}[\s\-]?[A-Z]{1,2}[\s\-]?\d{4}\b',
+    "email":           r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}',
+    "pincode":         r'\b[1-9][0-9]{2}\s?[0-9]{3}\b',
+    "date":            r'\b\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}\b|\b\d{4}[-/.]\d{1,2}[-/.]\d{1,2}\b',
+    "uhid_mrn":        r'(?i)\b(?:UHID|MRN|REG|IPD|OPD|CR|PID|HID|PATIENT\s*ID|MEDICAL\s*UHID)[\s:/-]?\w+\b',
+    "age_years":       r'(?i)\baged?\s+(?:about\s+)?(\d{1,3}\s*years?)\b',
+    "age_sex":         r'\b\d{1,3}\s*[/]\s*[MFO]\b',
+    "name_prefix":     r'(?i)\b(?:DR\.?|MR\.?|MRS\.?|MS\.?|SHRI|SMT|S/O|D/O|W/O|KUMAR|KUMARI)\b',
+    "accession":       r'(?i)\b(?:ACC|ACCNO|ACCESSION)[\s:.-]?\w+\b',
 }
+
+
