@@ -14,7 +14,7 @@ import sys
 # ==============================================================================
 # 🔑 PASTE YOUR HUGGING FACE TOKEN HERE (Optional: or enter it when prompted)
 # ==============================================================================
-HF_TOKEN = ""
+HF_TOKEN = "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"
 # ==============================================================================
 
 
