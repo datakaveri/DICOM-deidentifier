@@ -305,13 +305,12 @@ def main():
     print(f"\n{'='*75}")
     print(f"PARALLEL BATCH COMPLETE: {len(results)} file(s) in {total_batch_time:.2f}s (Throughput: {avg_time:.2f}s/file)")
     print(f"{'='*75}")
-    print(f"{'File Name':<42} {'Status':<18} {'Regions':<8} {'Time (s)':<8}")
-    print(f"{'-'*42} {'-'*18} {'-'*8} {'-'*8}")
-    for audit in sorted(results, key=lambda x: x.get("file", "")):
-        t_sec = audit.get("execution_time_seconds", 0)
-        num_regions = len(audit.get("redacted_regions", []))
-        status = audit.get("verification_status", "UNKNOWN")
-        print(f"{audit['file'][:40]:<42} {status:<18} {num_regions:<8} {t_sec:>6.2f}s")
+    from audit_reporter import generate_batch_redaction_summary
+    report_meta = generate_batch_redaction_summary(results, target_out)
+    print("PARALLEL BATCH REDACTION MASTER AUDIT GENERATED:")
+    print(f"  --> Master Redaction Audit JSON : {report_meta['json_path']}")
+    print(f"  --> Master Redaction Audit CSV  : {report_meta['csv_path']}")
+    print(f"  --> Master Redaction Audit MD   : {report_meta['markdown_path']}")
     print(f"{'='*75}\n")
 
 

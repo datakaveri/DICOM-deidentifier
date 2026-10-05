@@ -299,7 +299,7 @@ def expand_phi_blocks(merged, phi_regions, image_shape):
                         log.info(f"    KEEP-SIBLING (block_expand_override): '{sibling_text}' @ {list(b)}")
                         continue
                     log.info(f"    REDACT (block_expand): '{sibling_text}' @ {list(b)}")
-                    phi_regions.append({"text": sibling_text, "bbox": list(b)})
+                    phi_regions.append({"text": sibling_text, "bbox": list(b), "reason": "block_expand:sibling_line"})
                     phi_bboxes.add(b)
                     added += 1
 
@@ -324,7 +324,7 @@ def expand_phi_blocks(merged, phi_regions, image_shape):
                     bridge_bbox = [bridge_x1, gap_y1, bridge_x2, gap_y2]
                     # Ensure no confirmed clinical text is inside this gap
                     if not any(_is_clinical(m["text"]) and _containment(bridge_bbox, m["bbox"]) > 0.5 for m in merged):
-                        phi_regions.append({"text": "[gap_bridge]", "bbox": bridge_bbox})
+                        phi_regions.append({"text": "[gap_bridge]", "bbox": bridge_bbox, "reason": "block_expand:gap_bridge"})
                         phi_bboxes.add(tuple(bridge_bbox))
                         added += 1
 
@@ -382,7 +382,7 @@ def _is_clinical(text):
     return False
 
 
-def classify_phi(merged, image_shape, analyzer=None, gliner_model=None, medical_ner=None, deid_model=None, fallback_medical_ner=None, indian_ner=None, metadata_values=None):
+def classify_phi(merged, image_shape, analyzer=None, gliner_model=None, medical_ner=None, deid_model=None, fallback_medical_ner=None, indian_ner=None, metadata_values=None, return_details=False):
     """
     Classifies each merged detection as PHI (redact) or safe (keep) using
     GROUND-TRUTH METADATA CROSS-VERIFICATION.
@@ -399,6 +399,7 @@ def classify_phi(merged, image_shape, analyzer=None, gliner_model=None, medical_
     """
     h, w = image_shape[:2]
     phi_regions = []
+    kept_regions = []
 
     # ── Prepare normalized metadata ground truth cache ────────────────────────
     normalized_metadata = set()
@@ -532,10 +533,14 @@ def classify_phi(merged, image_shape, analyzer=None, gliner_model=None, medical_
             is_phi = False
             reason.append("cross_verify:clinical_or_non_pii_kept")
 
+        reason_str = ", ".join(reason) if reason else "unspecified"
         if is_phi:
-            log.info(f"    REDACT ({', '.join(reason)}): '{text}' @ {bbox}")
-            phi_regions.append({"text": text, "bbox": bbox})
+            log.info(f"    REDACT ({reason_str}): '{text}' @ {bbox}")
+            phi_regions.append({"text": text, "bbox": bbox, "reason": reason_str})
         else:
-            log.info(f"    KEEP ({', '.join(reason)}): '{text}' @ {bbox}")
+            log.info(f"    KEEP ({reason_str}): '{text}' @ {bbox}")
+            kept_regions.append({"text": text, "bbox": bbox, "reason": reason_str})
 
+    if return_details:
+        return phi_regions, kept_regions
     return phi_regions

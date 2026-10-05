@@ -137,12 +137,12 @@ def main():
     print(f"\n{'='*75}")
     print(f"BATCH SUMMARY: {len(results)} file(s) processed in {total_batch_time:.2f}s (Avg: {avg_time:.2f}s/file)")
     print(f"{'='*75}")
-    print(f"{'File Name':<42} {'Status':<16} {'Regions':<8} {'Time (s)':<8}")
-    print(f"{'-'*42} {'-'*16} {'-'*8} {'-'*8}")
-    for audit in results:
-        t_sec = audit.get("execution_time_seconds", 0)
-        num_regions = len(audit.get("redacted_regions", []))
-        print(f"{audit['file'][:40]:<42} {audit['verification_status']:<16} {num_regions:<8} {t_sec:>6.2f}s")
+    from audit_reporter import generate_batch_redaction_summary
+    report_meta = generate_batch_redaction_summary(results, OUTPUT_DIR)
+    print("BATCH REDACTION MASTER AUDIT GENERATED:")
+    print(f"  --> Master Redaction Audit JSON : {report_meta['json_path']}")
+    print(f"  --> Master Redaction Audit CSV  : {report_meta['csv_path']}")
+    print(f"  --> Master Redaction Audit MD   : {report_meta['markdown_path']}")
     print(f"{'='*75}\n")
 
 

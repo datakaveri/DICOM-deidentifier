@@ -54,6 +54,7 @@ def anonymize_dicom_file(input_path, before_output_path, output_path,
         "modality":    "Unknown",
         "image_size":  "Unknown",
         "redacted_regions": [],
+        "kept_regions": [],
         "deidentified_tags": [],
         "verification_status": "NOT RUN",
         "error": None
@@ -114,52 +115,38 @@ def anonymize_dicom_file(input_path, before_output_path, output_path,
             ocr_frame = norm_8
             ocr_pixels = pixels
 
-        # ── Stage 2: Text region detection (shape-based, no OCR) ──────────────
-        log.info("  [Stage 2] Detecting candidate text regions...")
-        text_regions = detect_text_regions(ocr_frame)
-        
-        # Burned-in PHI headers and footers almost always appear in the top or bottom margins.
-        # Add high-resolution margin bands as guaranteed candidates if bright pixels exist,
-        # so small edge text (e.g. Patient Name / DOB at row 0) is never lost to full-image downscaling.
-        frame_h, frame_w = ocr_frame.shape[:2]
-        margin_h = max(60, int(frame_h * 0.12))
-        top_crop = ocr_frame[:margin_h, :]
-        if top_crop.size > 0 and int(top_crop.max()) >= 80:
-            text_regions.append([0, 0, frame_w, margin_h])
-        bottom_crop = ocr_frame[frame_h - margin_h:, :]
-        if bottom_crop.size > 0 and int(bottom_crop.max()) >= 80:
-            text_regions.append([0, frame_h - margin_h, frame_w, frame_h])
+        # ── Stage 2 & 3: OCR Detection (Default: Fast Full-Image Mode) ────────
+        ocr_mode = os.getenv("OCR_MODE", "full").strip().lower()
+        if ocr_mode == "dual":
+            log.info("  [Stage 2] Detecting candidate text regions (Dual Mode)...")
+            text_regions = detect_text_regions(ocr_frame)
+            frame_h, frame_w = ocr_frame.shape[:2]
+            margin_h = max(60, int(frame_h * 0.12))
+            top_crop = ocr_frame[:margin_h, :]
+            if top_crop.size > 0 and int(top_crop.max()) >= 80:
+                text_regions.append([0, 0, frame_w, margin_h])
+            bottom_crop = ocr_frame[frame_h - margin_h:, :]
+            if bottom_crop.size > 0 and int(bottom_crop.max()) >= 80:
+                text_regions.append([0, frame_h - margin_h, frame_w, frame_h])
 
-        log.info(f"            Candidate regions (including margin bands): {len(text_regions)}")
-
-        # ── Stage 3: OCR ──────────────────────────────────────────────────────
-        # Two-pass OCR strategy:
-        #   Pass 1 (Region-based): Fast, runs PaddleOCR on cropped candidate regions.
-        #   Pass 2 (Full-image):   Safety net — catches text that the shape-based
-        #                          detector in Stage 2 missed entirely (e.g. text
-        #                          at the very top/bottom pixel rows, or text over
-        #                          complex anatomy that didn't form clean blobs).
-        # Both passes are merged via NMS dedup in Stage 4.
-        log.info("  [Stage 3] Running OCR — dual-pass (region-based + full-image)...")
-        raw_det = detect_text_in_regions(ocr_frame, text_regions, paddle_ocr=paddle_ocr, run_on_regions=True)
-        log.info(f"            Region-based OCR detections: {len(raw_det)}")
-
-        # Pass 2: Full-image OCR (always run as safety net)
-        full_det = detect_text_in_regions(ocr_frame, text_regions, paddle_ocr=paddle_ocr, run_on_regions=False)
-        log.info(f"            Full-image OCR detections: {len(full_det)}")
-
-        # Merge both passes — NMS dedup in merge_detections() will handle overlaps
-        raw_det = raw_det + full_det
-        log.info(f"            Combined raw detections: {len(raw_det)}")
+            log.info("  [Stage 3] Running OCR — dual-pass (region-based + full-image)...")
+            raw_det = detect_text_in_regions(ocr_frame, text_regions, paddle_ocr=paddle_ocr, run_on_regions=True)
+            full_det = detect_text_in_regions(ocr_frame, text_regions, paddle_ocr=paddle_ocr, run_on_regions=False)
+            raw_det = raw_det + full_det
+            log.info(f"            Combined raw detections: {len(raw_det)}")
+        else:
+            log.info("  [Stage 3] Running Full-Image PaddleOCR detection...")
+            raw_det = detect_text_in_regions(ocr_frame, None, paddle_ocr=paddle_ocr, run_on_regions=False)
+            log.info(f"            Full-image OCR detections: {len(raw_det)}")
 
         # ── Stage 4: Metadata Cross-Verification & Classification ────────────
         log.info("  [Stage 4] Cross-verifying OCR text against DICOM metadata PII...")
         stored_values = load_original_tag_values(data_snapshot_path)
         merged = merge_detections(raw_det)
-        phi_regions = classify_phi(
+        phi_regions, kept_regions = classify_phi(
             merged, ocr_frame.shape, analyzer, gliner_model, medical_ner, deid_model,
             fallback_medical_ner=fallback_medical_ner, indian_ner=indian_ner,
-            metadata_values=stored_values
+            metadata_values=stored_values, return_details=True
         )
         phi_regions = expand_phi_blocks(merged, phi_regions, ocr_frame.shape)
         log.info(f"            PHI regions to redact: {len(phi_regions)}")
@@ -170,14 +157,24 @@ def anonymize_dicom_file(input_path, before_output_path, output_path,
         added = 0
         for m in tag_matches:
             if not any(_iou(m["bbox"], b) > 0.3 for b in existing_bboxes):
+                m["reason"] = "safety_net:stored_tag_match"
                 phi_regions.append(m)
                 existing_bboxes.append(m["bbox"])
                 added += 1
         if added:
             log.info(f"            Additional regions matched to stored tags: {added}")
 
+        # Filter kept_regions so anything redacted in block expansion / safety-net is excluded
+        phi_boxes_set = {tuple(r["bbox"]) for r in phi_regions}
+        final_kept = [k for k in kept_regions if tuple(k["bbox"]) not in phi_boxes_set]
+
         audit["redacted_regions"] = [
-            {"text": r["text"], "bbox": r["bbox"]} for r in phi_regions
+            {"text": r["text"], "bbox": r["bbox"], "reason": r.get("reason", "cross_verify:phi_detected")}
+            for r in phi_regions
+        ]
+        audit["kept_regions"] = [
+            {"text": k["text"], "bbox": k["bbox"], "reason": k.get("reason", "clinical_or_non_pii_kept")}
+            for k in final_kept
         ]
 
         # ── Bbox visualization: save the frame with PHI regions boxed ─────────

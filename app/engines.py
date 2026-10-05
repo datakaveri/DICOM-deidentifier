@@ -81,6 +81,8 @@ def initialize_engines(use_gpu=False):
 
     paddle_ocr = None
     if PADDLE_AVAILABLE:
+        det_limit = int(os.environ.get("PADDLE_DET_LIMIT_SIDE_LEN", "2048"))
+        det_db_thresh = float(os.environ.get("PADDLE_DET_DB_THRESH", "0.25"))
         try:
             paddle_ocr = PaddleOCR(
                 use_angle_cls=False,
@@ -88,6 +90,8 @@ def initialize_engines(use_gpu=False):
                 use_gpu=use_gpu,
                 enable_mkldnn=False,
                 cpu_threads=cpu_threads,
+                det_limit_side_len=det_limit,
+                det_db_thresh=det_db_thresh,
             )
         except Exception as e1:
             log.info(f"Tuned PaddleOCR init failed ({e1}), falling back to standard init...")
