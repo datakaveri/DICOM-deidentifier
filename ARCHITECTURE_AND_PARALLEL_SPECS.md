@@ -36,6 +36,7 @@ flowchart TD
 
     OUT_AFTER --> PREV["Generate normalized after_preview.png"]
     OUT_AFTER --> AUDIT["Generate pipeline_audit.json (Timing, BBoxes, Verif Status)"]
+    OUT_AFTER --> Q_VERIF["Stage 8: Quality Verification -> quality_verification.json<br>(Stage 1 Metadata 100%, Stage 2 Image Integrity, Bit-Depth Aware)"]
 ```
 
 ---
@@ -205,6 +206,9 @@ sequenceDiagram
     WP->>TAG: Stage 7: Apply PS3.15 tag mapping (Hash, Tokenize, Mask, Suppress)
     TAG-->>WP: Tag-scrubbed dataset
     WP->>FS: Save final: after_deidentification.dcm + after_preview.png + pipeline_audit.json
+    WP->>QVF: Stage 8: Two-stage quality verification (Metadata compliance + Image integrity)
+    QVF-->>WP: Verification report generated
+    WP->>FS: Save quality_verification.json (Pure JSON, 4-stage schema, bit-depth aware)
 ```
 
 ---
@@ -220,4 +224,6 @@ sequenceDiagram
 | **5** | Navier-Stokes Inpainting | ~0.25s – 0.45s | **12%** | PDE boundary value iterations | Character stroke isolation (only letters inpainted) |
 | **6** | Verification Gate | ~0.01s – 0.05s | 2% | Re-verification | **Tier 1 stroke residual gate (<1ms)** |
 | **7** | Tag De-Identification & Save | ~0.15s – 0.25s | 8% | Cryptographic hashing & file writes | Reused in-memory KeyStore |
+| **8** | Two-Stage Quality Verification | ~0.02s – 0.05s | 2% | Statistical & Metadata Auditing | Vectorized MSE/SSIM, in-line morphological harmony |
 | **All** | **Total per File (Single Worker)** | **~2.3s – 4.0s** | **100%** | — | **Throughput across 6 Workers: ~0.4s to 0.7s / file** |
+
