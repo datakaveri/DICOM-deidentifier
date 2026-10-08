@@ -20,6 +20,7 @@ from verify import verify_redaction
 from dicom_io import write_pixels_to_dicom
 from de_identification.deidentify import deidentify_dataset
 from bbox_visualize import save_bbox_image
+from quality_verify import run_quality_verification
 
 
 def anonymize_dicom_file(input_path, before_output_path, output_path,
@@ -250,6 +251,30 @@ def anonymize_dicom_file(input_path, before_output_path, output_path,
             cv2.imwrite(preview_p, preview_8)
         except Exception as pe:
             log.warning(f"  Could not save after_preview.png: {pe}")
+
+        # ── Post-Pipeline Quality Verification ────────────────────────────────
+        try:
+            quality_metrics = run_quality_verification(
+                input_path, output_path,
+                audit["redacted_regions"], audit.get("kept_regions", []),
+                inline_verification_status=audit.get("verification_status")
+            )
+            audit["quality_verification"] = quality_metrics
+            audit["plain_english_summary"] = quality_metrics.get("plain_english_summary", {})
+
+            # Save standalone quality_verification.json (JSON-native reporting, no HTML)
+            try:
+                out_dir = os.path.dirname(output_path)
+                quality_json_path = os.path.join(out_dir, "quality_verification.json")
+                with open(quality_json_path, "w") as qf:
+                    json.dump(quality_metrics.get("structured_format", quality_metrics), qf, indent=2)
+                audit["quality_verification_json"] = quality_json_path
+            except Exception as jse:
+                log.warning(f"  [Quality] Could not save quality_verification.json: {jse}")
+
+        except Exception as qe:
+            log.warning(f"  [Quality] Verification failed: {qe}")
+            audit["quality_verification"] = {"error": str(qe)}
 
     except Exception as e:
         log.error(f"  [ERROR] {filename}: {e}", exc_info=True)
