@@ -29,6 +29,10 @@ PIPELINE & MODEL ARCHITECTURE:
      - Model cache pre-warming: AI model weights downloaded once in main process before spawning.
      - Worker isolation: Persistent in-memory model instances per worker with capped thread count.
      - Linux forkserver / Windows spawn compatibility with oneDNN/PIR hardening.
+  8. Real-time Detection Tracking & Audit Answers:
+     - Emits per-file JSON logs with explicit model attribution (which model detected the item),
+       category, decision reasoning, and multi-tier confidence metrics (OCR + Model + Combined).
+     - Generates unified batch audit reports (JSON, CSV, MD) covering all processed files.
 """
 
 # ── 0. Paddle environment hardening (MUST be first) ──────────────────────────

@@ -184,6 +184,9 @@ def match_against_stored_tags(merged, stored_values, image_shape):
     """
     Cross-checks OCR-detected burned-in text directly against the ground-truth
     DICOM metadata PII values (PatientName, PatientID, InstitutionName, dates, etc.).
+
+    Returns enriched candidate regions containing model attribution
+    ('safety_net_metadata_matcher'), category ('METADATA_PII'), and confidence scores.
     """
     if not stored_values:
         return []

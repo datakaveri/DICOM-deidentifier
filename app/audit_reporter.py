@@ -2,8 +2,12 @@
 audit_reporter.py — Comprehensive Batch Redaction Summary & Audit Generator.
 
 Generates unified reports across all processed DICOM files in a batch:
-  1. redaction_summary.json  — Complete machine-readable master audit file.
-  2. redaction_summary.csv   — Tabular report for Excel/Sheets (filter by REDACTED vs KEPT).
+  1. redaction_summary.json  — Complete machine-readable master audit file. Includes
+                               detailed per-file detection objects with detecting model,
+                               category, decision reasoning, and multi-tier confidence metrics
+                               under pixel_redactions, clinical_preserved, and detections.
+  2. redaction_summary.csv   — Tabular report for Excel/Sheets including Model and Confidence
+                               columns (filter by REDACTED vs KEPT).
   3. redaction_summary_report.md — Human-readable markdown audit report for clinical review.
 """
 
@@ -20,7 +24,8 @@ def generate_batch_redaction_summary(results: List[Dict[str, Any]], output_dir: 
     """
     Analyzes all pipeline audit results and writes out master summary files
     (JSON, CSV, Markdown) to output_dir so users can verify exactly what was
-    redacted and what was preserved across the whole dataset.
+    redacted and what was preserved across the whole dataset, including which
+    AI model or rule made each detection and its calibrated confidence score.
     """
     os.makedirs(output_dir, exist_ok=True)
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")

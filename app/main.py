@@ -10,6 +10,13 @@ de-identification (de_identification/deidentify.py — hash PatientID, mask
 dates, suppress direct identifiers, etc. per tag_mapping.py) runs last, and
 that final result is saved to after_deidentification.dcm.
 
+Output & Reporting:
+  - Outputs per-file JSON detection results one-by-one to console and pipeline_audit.json,
+    capturing: detected text, bounding box, action (REDACTED vs PRESERVED), category,
+    detecting model (metadata, presidio, ner, regex, allowlist), decision rationale, and
+    calibrated confidence metrics (OCR + Model + Combined).
+  - Generates consolidated batch redaction summary (JSON, CSV, MD) at completion.
+
 One KeyStore is loaded from SECURED_KEYSTORE_FILE ("secured.json") and
 shared across every file in the batch, then saved once at the end — so the
 same PatientID/AccessionNumber/etc. hashes or tokenises to the same value no

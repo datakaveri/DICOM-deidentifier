@@ -1,6 +1,19 @@
 """
 classify.py — Stage 4: merge overlapping OCR detections and classify each
 one as PHI (redact) or safe (keep).
+
+Attaches rich audit metadata to every detected region:
+  - text: The recognized text string.
+  - bbox: Bounding box coordinates [x1, y1, x2, y2].
+  - action: "REDACTED" (for PHI) or "PRESERVED" (for clinical text).
+  - category: Semantic category (e.g. PATIENT_NAME, METADATA_PII, CLINICAL_MARKER).
+  - model: The model/engine that made the classification (e.g. dicom_metadata_cross_verification,
+           presidio_analyzer, transformer_ner, regex_pattern_detector, clinical_allowlist_matcher).
+  - response_reason: Detailed decision rationale.
+  - confidence: Multi-tier confidence dict:
+      * ocr: Confidence score from PaddleOCR recognition.
+      * model: Confidence score from the classifier / recognizer.
+      * combined: Blended joint confidence (ocr * model).
 """
 
 import re
@@ -415,6 +428,15 @@ def classify_phi(merged, image_shape, analyzer=None, gliner_model=None, medical_
     Classifies each merged detection as PHI (redact) or safe (keep) using
     GROUND-TRUTH METADATA CROSS-VERIFICATION.
 
+    Attaches full detection attribution to every item:
+      - text: recognized string
+      - bbox: [x1, y1, x2, y2]
+      - action: "REDACTED" or "PRESERVED"
+      - category: semantic classification (PATIENT_NAME, METADATA_PII, etc.)
+      - model: detector model/rule name
+      - response_reason: classification explanation
+      - confidence: {"ocr": float, "model": float, "combined": float}
+
     Core Strategy:
       1. Candidate text is cross-verified against the DICOM metadata ground truth
          (PatientName, PatientID, DOB, Doctor, Hospital, Address).
@@ -422,8 +444,7 @@ def classify_phi(merged, image_shape, analyzer=None, gliner_model=None, medical_
       3. Explicit demographic labels with values (PATIENT:, MRN:, DOB:, DR:) are checked.
       4. General NER / Presidio false positives (e.g. tagging anatomy/findings as PERSON or LOCATION)
          are filtered out unless corroborated by metadata or explicit demographic label.
-      5. Clinical findings, anatomy, and scan text that do not match metadata PII are NEVER touched.
-         (Clinical allowlist is commented out in favor of dynamic metadata cross-verification).
+      5. Clinical findings, anatomy, and scan text that do not match metadata PII are preserved.
     """
     h, w = image_shape[:2]
     phi_regions = []

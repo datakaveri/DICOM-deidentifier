@@ -2,6 +2,11 @@
 pipeline.py — full 7-stage anonymization pipeline for a single DICOM file.
 Wires together metadata sanitization, OCR-based PHI detection/classification,
 tag cross-checking, pixel redaction, verification, and DICOM write-back.
+
+Stage 4 extracts complete detection telemetry for audit logs:
+  - Preserves detected text, bounding boxes, action (REDACTED/PRESERVED),
+    category, detecting model/engine, decision rationale, and multi-tier confidence.
+  - Stores audit["redacted_regions"], audit["kept_regions"], and audit["detections"].
 """
 
 import os
