@@ -218,6 +218,7 @@ def merge_detections(raw, iou_thresh=0.3):
                 existing["bbox"][1] = min(existing["bbox"][1], det["bbox"][1])
                 existing["bbox"][2] = max(existing["bbox"][2], det["bbox"][2])
                 existing["bbox"][3] = max(existing["bbox"][3], det["bbox"][3])
+                existing["confidence"] = max(existing.get("confidence", 0.9), det.get("confidence", 0.9))
                 if len(det["text"]) > len(existing["text"]):
                     existing["text"] = det["text"]
                 is_dup = True
@@ -298,8 +299,22 @@ def expand_phi_blocks(merged, phi_regions, image_shape):
                     if _is_clinical(sibling_text):
                         log.info(f"    KEEP-SIBLING (block_expand_override): '{sibling_text}' @ {list(b)}")
                         continue
+                    sibling_conf = float(merged[i].get("confidence", 0.90))
                     log.info(f"    REDACT (block_expand): '{sibling_text}' @ {list(b)}")
-                    phi_regions.append({"text": sibling_text, "bbox": list(b), "reason": "block_expand:sibling_line"})
+                    phi_regions.append({
+                        "text": sibling_text,
+                        "bbox": list(b),
+                        "action": "REDACTED",
+                        "category": "DEMOGRAPHIC_BLOCK",
+                        "model": "spatial_block_expansion",
+                        "reason": "block_expand:sibling_line",
+                        "response_reason": "block_expand:sibling_line",
+                        "confidence": {
+                            "ocr": round(sibling_conf, 3),
+                            "model": 0.85,
+                            "combined": round(sibling_conf * 0.85, 3)
+                        }
+                    })
                     phi_bboxes.add(b)
                     added += 1
 
@@ -324,7 +339,20 @@ def expand_phi_blocks(merged, phi_regions, image_shape):
                     bridge_bbox = [bridge_x1, gap_y1, bridge_x2, gap_y2]
                     # Ensure no confirmed clinical text is inside this gap
                     if not any(_is_clinical(m["text"]) and _containment(bridge_bbox, m["bbox"]) > 0.5 for m in merged):
-                        phi_regions.append({"text": "[gap_bridge]", "bbox": bridge_bbox, "reason": "block_expand:gap_bridge"})
+                        phi_regions.append({
+                            "text": "[gap_bridge]",
+                            "bbox": bridge_bbox,
+                            "action": "REDACTED",
+                            "category": "DEMOGRAPHIC_BLOCK_GAP",
+                            "model": "spatial_block_expansion",
+                            "reason": "block_expand:gap_bridge",
+                            "response_reason": "block_expand:gap_bridge",
+                            "confidence": {
+                                "ocr": 0.90,
+                                "model": 0.85,
+                                "combined": 0.765
+                            }
+                        })
                         phi_bboxes.add(tuple(bridge_bbox))
                         added += 1
 
@@ -471,6 +499,7 @@ def classify_phi(merged, image_shape, analyzer=None, gliner_model=None, medical_
 
         # ── 4. GENERAL NER & PRESIDIO ANALYSIS ────────────────────────────────
         ner_phi_labels = []
+        ner_max_score = 0.0
         ner_engine = indian_ner if indian_ner is not None else deid_model
         if ner_engine:
             try:
@@ -481,6 +510,7 @@ def classify_phi(merged, image_shape, analyzer=None, gliner_model=None, medical_
                         cat = str(ent.get("cat", "")).upper()
                         if score >= 0.45 and cat in {"PERSON", "LOCATION", "ORGANIZATION", "PER", "LOC", "ORG"}:
                             ner_phi_labels.append(f"ner_{cat.lower()}")
+                            ner_max_score = max(ner_max_score, score)
                 else:
                     entities = ner_engine(clean_text)
                     for ent in entities:
@@ -489,33 +519,54 @@ def classify_phi(merged, image_shape, analyzer=None, gliner_model=None, medical_
                         clean_group = re.sub(r'^[BILOU]-', '', raw_group, flags=re.IGNORECASE).upper()
                         if score > 0.50 and clean_group in {"PER", "LOC", "ORG", "PERSON", "LOCATION", "ORGANIZATION"}:
                             ner_phi_labels.append(clean_group)
+                            ner_max_score = max(ner_max_score, score)
             except Exception as e:
                 log.debug(f"NER error: {e}")
 
         presidio_flagged = False
+        presidio_max_score = 0.0
+        presidio_entity_type = ""
         if analyzer:
             try:
                 results = analyzer.analyze(text=clean_text, language="en")
-                if any(r.entity_type in {"PERSON", "DATE_TIME", "LOCATION", "EMAIL_ADDRESS", "PHONE_NUMBER"} and r.score > 0.50 for r in results):
-                    presidio_flagged = True
+                for r in results:
+                    if r.entity_type in {"PERSON", "DATE_TIME", "LOCATION", "EMAIL_ADDRESS", "PHONE_NUMBER"} and r.score > 0.50:
+                        presidio_flagged = True
+                        if r.score > presidio_max_score:
+                            presidio_max_score = float(r.score)
+                            presidio_entity_type = str(r.entity_type)
             except Exception:
                 pass
+
+        ocr_conf = float(det.get("confidence", 0.95))
+        detected_model = "unspecified"
+        category = "PII"
+        model_conf = 0.5
 
         # ── 5. CROSS-VERIFICATION DECISION MATRIX ──────────────────────────────
         # Rule 1: Text directly matches DICOM metadata ground truth (PatientName, ID, Doctor, Hospital, DOB)
         if matches_metadata:
             is_phi = True
             reason.append(f"cross_verify:metadata_match({matched_tag_val})")
+            detected_model = "dicom_metadata_cross_verification"
+            category = "METADATA_PII"
+            model_conf = 1.0 if (matched_tag_val and matched_tag_val == val_upper) else 0.96
 
         # Rule 2: Text matches universal structured PII pattern (Aadhaar, PAN, phone, email)
         elif matches_universal_pii:
             is_phi = True
             reason.append(f"cross_verify:universal_pii({','.join(regex_reasons)})")
+            detected_model = "regex_pattern_detector"
+            category = regex_reasons[0].replace("regex:", "").upper() if regex_reasons else "IDENTIFIER"
+            model_conf = 0.99
 
         # Rule 3: Text has explicit demographic label with value (e.g. "PATIENT: ...", "DOB: ...")
         elif has_demographic_value and (ner_phi_labels or presidio_flagged or any(c.isdigit() for c in clean_text) or len(val_tokens) >= 2):
             is_phi = True
             reason.append("cross_verify:demographic_labeled_pii")
+            detected_model = "demographic_label_heuristic"
+            category = "DEMOGRAPHIC_PII"
+            model_conf = max(0.92, ner_max_score, presidio_max_score)
 
         # Rule 4: NER / Presidio detected person or location
         # MUST BE CORROBORATED by metadata or demographic label to avoid destroying medical text
@@ -523,23 +574,59 @@ def classify_phi(merged, image_shape, analyzer=None, gliner_model=None, medical_
             if has_demographic_label or matches_metadata:
                 is_phi = True
                 reason.append("cross_verify:ner_corroborated_pii")
+                models_used = []
+                if ner_phi_labels:
+                    models_used.append("transformer_ner")
+                if presidio_flagged:
+                    models_used.append("presidio_analyzer")
+                detected_model = " + ".join(models_used) if models_used else "transformer_ner"
+                category = presidio_entity_type or (ner_phi_labels[0] if ner_phi_labels else "PERSON").upper()
+                model_conf = max(ner_max_score, presidio_max_score, 0.88)
             else:
                 # Discard generic NER false-positives on medical findings / anatomy
                 is_phi = False
                 reason.append("cross_verify:unverified_ner_discarded_clinical_kept")
+                detected_model = "clinical_guardian_filter"
+                category = "CLINICAL_OR_NON_PII"
+                model_conf = 0.85
 
         # Rule 5: Default Fallback — Everything else is KEPT!
         else:
             is_phi = False
-            reason.append("cross_verify:clinical_or_non_pii_kept")
+            if _is_fuzzy_clinical(clean_text):
+                reason.append("clinical_allowlist:clinical_term_preserved")
+                detected_model = "clinical_allowlist_matcher"
+                category = "CLINICAL_MARKER"
+                model_conf = 0.98
+            else:
+                reason.append("cross_verify:clinical_or_non_pii_kept")
+                detected_model = "unverified_text_preserved"
+                category = "CLINICAL_OR_NON_PII"
+                model_conf = 0.90
 
         reason_str = ", ".join(reason) if reason else "unspecified"
+        combined_conf = round(ocr_conf * model_conf, 3)
+
+        region_data = {
+            "text": text,
+            "bbox": bbox,
+            "action": "REDACTED" if is_phi else "PRESERVED",
+            "category": category,
+            "model": detected_model,
+            "reason": reason_str,
+            "response_reason": reason_str,
+            "confidence": {
+                "ocr": round(ocr_conf, 3),
+                "model": round(model_conf, 3),
+                "combined": combined_conf
+            }
+        }
         if is_phi:
-            log.info(f"    REDACT ({reason_str}): '{text}' @ {bbox}")
-            phi_regions.append({"text": text, "bbox": bbox, "reason": reason_str})
+            log.info(f"    REDACT ({reason_str}) [{detected_model} | conf={combined_conf}]: '{text}' @ {bbox}")
+            phi_regions.append(region_data)
         else:
-            log.info(f"    KEEP ({reason_str}): '{text}' @ {bbox}")
-            kept_regions.append({"text": text, "bbox": bbox, "reason": reason_str})
+            log.info(f"    KEEP ({reason_str}) [{detected_model} | conf={combined_conf}]: '{text}' @ {bbox}")
+            kept_regions.append(region_data)
 
     if return_details:
         return phi_regions, kept_regions

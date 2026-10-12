@@ -218,7 +218,21 @@ def match_against_stored_tags(merged, stored_values, image_shape):
             continue
 
         bbox = det["bbox"]
+        ocr_conf = float(det.get("confidence", 0.95))
         log.info(f"    REDACT-TAG-MATCH: '{text}' matches stored original metadata PII")
-        matches.append({"text": text, "bbox": bbox})
+        matches.append({
+            "text": text,
+            "bbox": bbox,
+            "action": "REDACTED",
+            "category": "METADATA_PII",
+            "model": "safety_net_metadata_matcher",
+            "reason": "safety_net:stored_tag_match",
+            "response_reason": "safety_net:stored_tag_match",
+            "confidence": {
+                "ocr": round(ocr_conf, 3),
+                "model": 0.98,
+                "combined": round(ocr_conf * 0.98, 3)
+            }
+        })
 
     return matches

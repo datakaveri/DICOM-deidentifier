@@ -170,13 +170,32 @@ def anonymize_dicom_file(input_path, before_output_path, output_path,
         final_kept = [k for k in kept_regions if tuple(k["bbox"]) not in phi_boxes_set]
 
         audit["redacted_regions"] = [
-            {"text": r["text"], "bbox": r["bbox"], "reason": r.get("reason", "cross_verify:phi_detected")}
+            {
+                "text": r.get("text", ""),
+                "bbox": r.get("bbox", []),
+                "action": r.get("action", "REDACTED"),
+                "category": r.get("category", "PII"),
+                "model": r.get("model", "unknown"),
+                "reason": r.get("reason", "cross_verify:phi_detected"),
+                "response_reason": r.get("response_reason", r.get("reason", "cross_verify:phi_detected")),
+                "confidence": r.get("confidence", {"ocr": 0.95, "model": 0.95, "combined": 0.902})
+            }
             for r in phi_regions
         ]
         audit["kept_regions"] = [
-            {"text": k["text"], "bbox": k["bbox"], "reason": k.get("reason", "clinical_or_non_pii_kept")}
+            {
+                "text": k.get("text", ""),
+                "bbox": k.get("bbox", []),
+                "action": k.get("action", "PRESERVED"),
+                "category": k.get("category", "CLINICAL_OR_NON_PII"),
+                "model": k.get("model", "unknown"),
+                "reason": k.get("reason", "clinical_or_non_pii_kept"),
+                "response_reason": k.get("response_reason", k.get("reason", "clinical_or_non_pii_kept")),
+                "confidence": k.get("confidence", {"ocr": 0.95, "model": 0.95, "combined": 0.902})
+            }
             for k in final_kept
         ]
+        audit["detections"] = audit["redacted_regions"] + audit["kept_regions"]
 
         # ── Bbox visualization: save the frame with PHI regions boxed ─────────
         bbox_output_path = os.path.join(os.path.dirname(before_output_path), BBOX_IMAGE_NAME)

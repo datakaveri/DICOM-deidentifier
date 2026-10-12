@@ -98,6 +98,19 @@ def process_file(input_path, paddle_ocr, analyzer, keystore,
         print(f"Bounding-box visualization saved -> {pipeline_audit['bbox_image_path']}")
     print(f"Full pipeline audit saved -> {pipeline_audit_snapshot}")
 
+    # Output per-file structured JSON answer to console
+    file_summary_json = {
+        "filename": os.path.basename(input_path),
+        "status": pipeline_audit.get("verification_status", "UNKNOWN"),
+        "execution_time_seconds": elapsed_sec,
+        "pixel_redactions_count": len(pipeline_audit.get("redacted_regions", [])),
+        "clinical_preserved_count": len(pipeline_audit.get("kept_regions", [])),
+        "detections": pipeline_audit.get("detections", pipeline_audit.get("redacted_regions", []) + pipeline_audit.get("kept_regions", []))
+    }
+    print(f"\n{'='*25} FILE DETECTION JSON: {os.path.basename(input_path)} {'='*25}")
+    print(json.dumps(file_summary_json, indent=2))
+    print(f"{'='*75}\n")
+
     return pipeline_audit
 
 

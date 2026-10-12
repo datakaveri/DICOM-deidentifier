@@ -215,6 +215,18 @@ def process_single_file(input_path):
         with open(pipeline_audit_snapshot, "w") as f:
             json.dump(pipeline_audit, f, indent=2)
 
+        file_summary_json = {
+            "filename": os.path.basename(input_path),
+            "status": pipeline_audit.get("verification_status", "UNKNOWN"),
+            "execution_time_seconds": elapsed_sec,
+            "pixel_redactions_count": len(pipeline_audit.get("redacted_regions", [])),
+            "clinical_preserved_count": len(pipeline_audit.get("kept_regions", [])),
+            "detections": pipeline_audit.get("detections", pipeline_audit.get("redacted_regions", []) + pipeline_audit.get("kept_regions", []))
+        }
+        print(f"\n{'='*25} [PARALLEL] FILE DETECTION JSON: {os.path.basename(input_path)} {'='*25}")
+        print(json.dumps(file_summary_json, indent=2))
+        print(f"{'='*75}\n")
+
         print(f"  [DONE] {os.path.basename(input_path)} -> {pipeline_audit['verification_status']} ({elapsed_sec:.2f}s)")
         return pipeline_audit
 

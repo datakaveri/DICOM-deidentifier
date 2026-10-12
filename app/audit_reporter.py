@@ -60,7 +60,11 @@ def generate_batch_redaction_summary(results: List[Dict[str, Any]], output_dir: 
                 {
                     "text": r.get("text", ""),
                     "bbox": r.get("bbox", []),
-                    "reason": r.get("reason", "unspecified")
+                    "action": r.get("action", "REDACTED"),
+                    "category": r.get("category", "PII"),
+                    "model": r.get("model", "unknown"),
+                    "response_reason": r.get("response_reason", r.get("reason", "unspecified")),
+                    "confidence": r.get("confidence", {"ocr": 0.95, "model": 0.95, "combined": 0.902})
                 }
                 for r in redactions
             ],
@@ -69,9 +73,25 @@ def generate_batch_redaction_summary(results: List[Dict[str, Any]], output_dir: 
                 {
                     "text": k.get("text", ""),
                     "bbox": k.get("bbox", []),
-                    "reason": k.get("reason", "clinical_or_non_pii_kept")
+                    "action": k.get("action", "PRESERVED"),
+                    "category": k.get("category", "CLINICAL_OR_NON_PII"),
+                    "model": k.get("model", "unknown"),
+                    "response_reason": k.get("response_reason", k.get("reason", "clinical_or_non_pii_kept")),
+                    "confidence": k.get("confidence", {"ocr": 0.95, "model": 0.95, "combined": 0.902})
                 }
                 for k in kept
+            ],
+            "detections": [
+                {
+                    "text": d.get("text", ""),
+                    "bbox": d.get("bbox", []),
+                    "action": d.get("action", "REDACTED"),
+                    "category": d.get("category", "PII"),
+                    "model": d.get("model", "unknown"),
+                    "response_reason": d.get("response_reason", d.get("reason", "unspecified")),
+                    "confidence": d.get("confidence", {"ocr": 0.95, "model": 0.95, "combined": 0.902})
+                }
+                for d in audit.get("detections", redactions + kept)
             ],
             "metadata_deidentified_count": len(tags),
             "metadata_deidentified": [
@@ -96,11 +116,18 @@ def generate_batch_redaction_summary(results: List[Dict[str, Any]], output_dir: 
         "File Name",
         "Category",
         "Action",
+        "Model",
+        "Confidence",
         "Item Content / Field",
         "Coordinates / Technique",
         "Reason / Rule Triggered",
         "Verification Status"
     ]
+
+    def _fmt_conf(c):
+        if isinstance(c, dict):
+            return c.get("combined", c.get("ocr", 0.95))
+        return c if c is not None else 0.95
 
     with open(csv_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
@@ -114,11 +141,13 @@ def generate_batch_redaction_summary(results: List[Dict[str, Any]], output_dir: 
             for r in audit.get("redacted_regions", []):
                 writer.writerow([
                     fname,
-                    "Burned-in Pixel",
+                    r.get("category", "Burned-in Pixel"),
                     "REDACTED",
+                    r.get("model", "unknown"),
+                    _fmt_conf(r.get("confidence")),
                     r.get("text", ""),
                     str(r.get("bbox", [])),
-                    r.get("reason", "phi_detected"),
+                    r.get("response_reason", r.get("reason", "phi_detected")),
                     status
                 ])
 
@@ -126,11 +155,13 @@ def generate_batch_redaction_summary(results: List[Dict[str, Any]], output_dir: 
             for k in audit.get("kept_regions", []):
                 writer.writerow([
                     fname,
-                    "Burned-in Pixel",
+                    k.get("category", "Clinical Term"),
                     "KEPT (Clinical)",
+                    k.get("model", "unknown"),
+                    _fmt_conf(k.get("confidence")),
                     k.get("text", ""),
                     str(k.get("bbox", [])),
-                    k.get("reason", "clinical_kept"),
+                    k.get("response_reason", k.get("reason", "clinical_kept")),
                     status
                 ])
 
@@ -141,6 +172,8 @@ def generate_batch_redaction_summary(results: List[Dict[str, Any]], output_dir: 
                     fname,
                     "Metadata Header",
                     "DE-IDENTIFIED",
+                    "dicom_tag_rules",
+                    "1.0",
                     field_str,
                     t.get("technique", "suppress"),
                     t.get("action", "modified"),
