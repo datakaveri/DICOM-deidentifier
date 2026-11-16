@@ -46,9 +46,11 @@ python3.12 -m venv venv && source venv/bin/activate
 # 2. Install the locked dependencies (includes the spaCy model and CPU torch)
 pip install --require-hashes --no-deps -r requirements-dev.lock
 
-# 3. Run the batch pipeline (keys go to SKALD_KEYS_DIR, default: the CWD)
+# 3. Run the batch pipeline (keys go to SKALD_KEYS_DIR, default: the CWD).
+#    LD_PRELOAD works around paddlepaddle 2.6's bundled zlib, which otherwise
+#    segfaults on `import paddleocr`; the image sets it too (see Dockerfile).
 cd app
-SKALD_KEYS_DIR=../keys python main.py
+LD_PRELOAD=/lib/x86_64-linux-gnu/libz.so.1 SKALD_KEYS_DIR=../keys python main.py
 ```
 
 ### Running Tests

@@ -10,8 +10,8 @@
 #
 # Stage 1 (builder): compilers, the locked Python environment, and every model
 #                    weight (OCR, NER, spaCy). Nothing from this stage reaches
-#                    the final image except /opt/venv, the model caches and
-#                    the application source.
+#                    the final image except /opt/venv and the model caches;
+#                    app/ is copied into the runtime stage directly.
 # Stage 2 (runtime): the slim base plus the shared libraries OpenCV, Paddle
 #                    and PyTorch load at run time. No compiler, git or curl.
 #
@@ -68,24 +68,28 @@ RUN pip install --require-hashes --no-deps -r /tmp/requirements.lock \
 
 # Model caches live outside any home directory so the runtime user can read
 # them but not modify them.
+#
+# LD_PRELOAD: paddlepaddle 2.6's libpaddle carries its own zlib symbols. Once
+# it is loaded, any library that inflates data through zlib (lxml, which
+# paddleocr pulls in via python-docx and albumentations; Python's own zlib)
+# can bind to them and crash with SIGSEGV in inflateReset2 or fail with
+# "inconsistent stream state". Preloading the system libz makes every library
+# bind to one zlib. Remove it with the move to paddlepaddle 3.
 ENV HF_HOME=/opt/models/huggingface \
     PADDLE_OCR_BASE_DIR=/opt/models/paddleocr \
-    PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
-
-COPY app/ /app/
-WORKDIR /app
+    PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python \
+    LD_PRELOAD=/lib/x86_64-linux-gnu/libz.so.1
 
 # Download every OCR/NLP/transformer weight now, and fail the build if
-# PaddleOCR cannot initialise: the runtime image has no network.
+# PaddleOCR cannot initialise: the runtime image has no network. Only the two
+# modules the warm-up imports are copied, so editing the rest of app/ does not
+# invalidate this multi-GB layer.
+COPY app/engines.py app/config.py /warmup/
+WORKDIR /warmup
 RUN python -c "\
 from engines import check_gpu_available, initialize_engines; \
 p, a, d, m, g = initialize_engines(use_gpu=check_gpu_available()); \
-assert p is not None, 'PaddleOCR initialization failed'" \
-    && rm -rf /app/__pycache__ /app/*/__pycache__
-
-# Runtime directories, owned by the runtime user. keys/ is owner-only.
-RUN mkdir -p /rootfs/app/data /rootfs/app/config /rootfs/app/output /rootfs/app/keys /rootfs/home/app \
-    && chmod 0700 /rootfs/app/keys
+assert p is not None, 'PaddleOCR initialization failed'"
 
 # ── Stage 2: Runtime ──────────────────────────────────────────────────────────
 FROM python:3.12.16-slim@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b AS runtime
@@ -108,12 +112,12 @@ RUN apt-get update \
 # model weights and source cannot be altered by a compromised run.
 COPY --from=builder /opt/venv /opt/venv
 COPY --from=builder /opt/models /opt/models
-COPY --from=builder /app /app
-COPY --from=builder --chown=65532:65532 /rootfs/app/data /app/data
-COPY --from=builder --chown=65532:65532 /rootfs/app/config /app/config
-COPY --from=builder --chown=65532:65532 /rootfs/app/output /app/output
-COPY --from=builder --chown=65532:65532 /rootfs/app/keys /app/keys
-COPY --from=builder --chown=65532:65532 /rootfs/home/app /home/app
+COPY app/ /app/
+
+# Runtime directories, owned by the runtime user; keys/ is owner-only.
+RUN mkdir -p /app/data /app/config /app/output /app/keys /home/app \
+    && chown 65532:65532 /app/data /app/config /app/output /app/keys /home/app \
+    && chmod 0700 /app/keys
 
 ENV PATH=/opt/venv/bin:$PATH \
     HOME=/home/app \
@@ -121,6 +125,7 @@ ENV PATH=/opt/venv/bin:$PATH \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app \
     PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python \
+    LD_PRELOAD=/lib/x86_64-linux-gnu/libz.so.1 \
     HF_HOME=/opt/models/huggingface \
     PADDLE_OCR_BASE_DIR=/opt/models/paddleocr \
     HF_HUB_OFFLINE=1 \
