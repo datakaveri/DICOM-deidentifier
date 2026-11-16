@@ -27,8 +27,16 @@ def _apply_voi_lut(pixels, ds):
     ww_attr = getattr(ds, "WindowWidth", None) if ds else None
 
     if wc_attr is not None and ww_attr is not None:
-        wc = float(wc_attr[0]) if isinstance(wc_attr, (pydicom.multival.MultiValue, list)) else float(wc_attr)
-        ww = float(ww_attr[0]) if isinstance(ww_attr, (pydicom.multival.MultiValue, list)) else float(ww_attr)
+        wc = (
+            float(wc_attr[0])
+            if isinstance(wc_attr, (pydicom.multival.MultiValue, list))
+            else float(wc_attr)
+        )
+        ww = (
+            float(ww_attr[0])
+            if isinstance(ww_attr, (pydicom.multival.MultiValue, list))
+            else float(ww_attr)
+        )
         min_val = wc - 0.5 - (ww - 1.0) / 2.0
         visual = np.clip((rescaled - min_val) / max(ww - 1.0, 1.0) * 255.0, 0, 255)
     else:
@@ -53,8 +61,16 @@ def _apply_inverse_voi_lut(visual_pixels, ds, original_raw_pixels):
     ww_attr = getattr(ds, "WindowWidth", None) if ds else None
 
     if wc_attr is not None and ww_attr is not None:
-        wc = float(wc_attr[0]) if isinstance(wc_attr, (pydicom.multival.MultiValue, list)) else float(wc_attr)
-        ww = float(ww_attr[0]) if isinstance(ww_attr, (pydicom.multival.MultiValue, list)) else float(ww_attr)
+        wc = (
+            float(wc_attr[0])
+            if isinstance(wc_attr, (pydicom.multival.MultiValue, list))
+            else float(wc_attr)
+        )
+        ww = (
+            float(ww_attr[0])
+            if isinstance(ww_attr, (pydicom.multival.MultiValue, list))
+            else float(ww_attr)
+        )
         min_val = wc - 0.5 - (ww - 1.0) / 2.0
         rescaled = (visual_pixels.astype(np.float64) / 255.0) * (ww - 1.0) + min_val
     else:
@@ -116,7 +132,9 @@ def _get_character_mask(roi_8bit, bbox_local=None, dilation_px=2):
     crop_max = float(np.max(crop))
     if crop_max > bg_med + 12.0:
         t_contrast = bg_med + 0.25 * (crop_max - bg_med)
-        _, mask_contrast = cv2.threshold(crop, min(245.0, t_contrast), 255, cv2.THRESH_BINARY)
+        _, mask_contrast = cv2.threshold(
+            crop, min(245.0, t_contrast), 255, cv2.THRESH_BINARY
+        )
     else:
         mask_contrast = np.zeros_like(crop)
 
@@ -154,7 +172,9 @@ def _inpaint_16bit(image_16, mask_8, radius=9, method=cv2.INPAINT_NS):
     raw_min = float(image_16.min())
     raw_max = float(image_16.max())
     if raw_max > raw_min:
-        temp_8 = ((image_16.astype(np.float32) - raw_min) / (raw_max - raw_min) * 255.0).astype(np.uint8)
+        temp_8 = (
+            (image_16.astype(np.float32) - raw_min) / (raw_max - raw_min) * 255.0
+        ).astype(np.uint8)
         inpainted_8 = cv2.inpaint(temp_8, mask_8, radius, method)
         result = (
             inpainted_8.astype(np.float32) / 255.0 * (raw_max - raw_min) + raw_min
@@ -180,7 +200,9 @@ def redact_roi(cleaned, x1, y1, x2, y2, pad=10):
 
     roi_min, roi_max = float(roi.min()), float(roi.max())
     if roi_max > roi_min:
-        roi_8 = ((roi.astype(np.float32) - roi_min) / (roi_max - roi_min) * 255.0).astype(np.uint8)
+        roi_8 = (
+            (roi.astype(np.float32) - roi_min) / (roi_max - roi_min) * 255.0
+        ).astype(np.uint8)
     else:
         roi_8 = roi.astype(np.uint8)
 
@@ -237,13 +259,14 @@ def _cluster_bboxes(regions, margin=8):
                     continue
                 b2 = boxes[j]
                 e1 = [b1[0] - margin, b1[1] - margin, b1[2] + margin, b1[3] + margin]
-                if (max(e1[0], b2[0]) < min(e1[2], b2[2]) and
-                        max(e1[1], b2[1]) < min(e1[3], b2[3])):
+                if max(e1[0], b2[0]) < min(e1[2], b2[2]) and max(e1[1], b2[1]) < min(
+                    e1[3], b2[3]
+                ):
                     b1 = [
                         min(b1[0], b2[0]),
                         min(b1[1], b2[1]),
                         max(b1[2], b2[2]),
-                        max(b1[3], b2[3])
+                        max(b1[3], b2[3]),
                     ]
                     visited[j] = True
                     merged = True
@@ -291,7 +314,9 @@ def redact_pixels(image_array, phi_regions, ds=None):
 
         cleaned = redact_roi(cleaned, x1, y1, x2, y2)
         redact_count += 1
-        log.info(f"  [Stage 5] Unified character stroke inpainting @ [{x1},{y1},{x2},{y2}]")
+        log.info(
+            f"  [Stage 5] Unified character stroke inpainting @ [{x1},{y1},{x2},{y2}]"
+        )
 
     log.info(
         f"  [Stage 5] Done. Total blocks redacted: {redact_count} | "

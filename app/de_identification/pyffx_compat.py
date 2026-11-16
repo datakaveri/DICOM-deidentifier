@@ -132,7 +132,9 @@ def fpe_decrypt_checked(key: bytes, text: str, alphabet: str) -> str:
         old_b = a
         c = b
         round_digits = _fill_round_digits(key, radix, i, old_b, len(c))
-        old_a = [(c[j] + radix - (round_digits[j] % radix)) % radix for j in range(len(c))]
+        old_a = [
+            (c[j] + radix - (round_digits[j] % radix)) % radix for j in range(len(c))
+        ]
         a, b = old_a, old_b
 
     return amap.decode(a + b)

@@ -77,8 +77,12 @@ def _binarize(image):
     # anatomy, where Otsu's single whole-image threshold sees the text as part
     # of the same bright class as the surrounding tissue.
     fg_adaptive = cv2.adaptiveThreshold(
-        gray2x, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY,
-        _ADAPTIVE_BLOCK, _ADAPTIVE_C
+        gray2x,
+        255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY,
+        _ADAPTIVE_BLOCK,
+        _ADAPTIVE_C,
     )
 
     return fg_otsu, fg_adaptive
@@ -121,9 +125,11 @@ def detect_text_regions(image_8bit):
             w_c = x2_c - x1_c
             area_c = ba // (_SCALE * _SCALE)
 
-            if (_MIN_CHAR_H <= h_c <= _MAX_CHAR_H and
-                    _MIN_CHAR_W <= w_c <= _MAX_CHAR_W and
-                    area_c >= _MIN_CHAR_AREA):
+            if (
+                _MIN_CHAR_H <= h_c <= _MAX_CHAR_H
+                and _MIN_CHAR_W <= w_c <= _MAX_CHAR_W
+                and area_c >= _MIN_CHAR_AREA
+            ):
                 box = (x1_c, y1_c, x2_c, y2_c)
                 if box not in seen:
                     seen.add(box)

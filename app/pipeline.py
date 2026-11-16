@@ -22,9 +22,18 @@ from de_identification.deidentify import deidentify_dataset
 from bbox_visualize import save_bbox_image
 
 
-def anonymize_dicom_file(input_path, before_output_path, output_path,
-                          data_snapshot_path, paddle_ocr, analyzer,
-                          keystore, deid_model=None, medical_ner=None, gliner_model=None):
+def anonymize_dicom_file(
+    input_path,
+    before_output_path,
+    output_path,
+    data_snapshot_path,
+    paddle_ocr,
+    analyzer,
+    keystore,
+    deid_model=None,
+    medical_ner=None,
+    gliner_model=None,
+):
     """
     Full 7-stage anonymization pipeline for a single DICOM file: burned-in
     pixel/OCR redaction (checkpointed to before_output_path, tags still
@@ -46,16 +55,16 @@ def anonymize_dicom_file(input_path, before_output_path, output_path,
 
     audit = {
         "file": filename,
-        "input_path":  input_path,
+        "input_path": input_path,
         "before_output_path": before_output_path,
         "output_path": output_path,
-        "timestamp":   datetime.datetime.now().isoformat(),
-        "modality":    "Unknown",
-        "image_size":  "Unknown",
+        "timestamp": datetime.datetime.now().isoformat(),
+        "modality": "Unknown",
+        "image_size": "Unknown",
         "redacted_regions": [],
         "deidentified_tags": [],
         "verification_status": "NOT RUN",
-        "error": None
+        "error": None,
     }
 
     try:
@@ -68,7 +77,7 @@ def anonymize_dicom_file(input_path, before_output_path, output_path,
         audit["image_size"] = f"{rows}x{cols}"
 
         # ── Extract pixels ────────────────────────────────────────────────────
-        if not hasattr(ds, 'pixel_array'):
+        if not hasattr(ds, "pixel_array"):
             log.warning(f"  No pixel data in {filename}. Saving metadata-only.")
             os.makedirs(os.path.dirname(before_output_path), exist_ok=True)
             ds.save_as(before_output_path, write_like_original=False)
@@ -89,7 +98,7 @@ def anonymize_dicom_file(input_path, before_output_path, output_path,
 
         # Fix MONOCHROME1 inversion (dark=bright for OCR correctness)
         photometric = getattr(ds, "PhotometricInterpretation", "MONOCHROME2")
-        is_monochrome1 = (photometric == "MONOCHROME1")
+        is_monochrome1 = photometric == "MONOCHROME1"
         original_max = None
         if is_monochrome1:
             original_max = np.max(pixels)
@@ -125,13 +134,17 @@ def anonymize_dicom_file(input_path, before_output_path, output_path,
 
         # ── Stage 4: Classify ─────────────────────────────────────────────────
         log.info("  [Stage 4] Classifying detections (PHI vs clinical)...")
-        merged     = merge_detections(raw_det)
-        phi_regions = classify_phi(merged, ocr_frame.shape, analyzer, gliner_model, medical_ner, deid_model)
+        merged = merge_detections(raw_det)
+        phi_regions = classify_phi(
+            merged, ocr_frame.shape, analyzer, gliner_model, medical_ner, deid_model
+        )
         phi_regions = expand_phi_blocks(merged, phi_regions, ocr_frame.shape)
         log.info(f"            PHI regions to redact: {len(phi_regions)}")
 
         # ── Step 3: match OCR text against the full original-tag backup ────────
-        log.info("  [Step 3] Cross-checking OCR text against data.json (original tag values)...")
+        log.info(
+            "  [Step 3] Cross-checking OCR text against data.json (original tag values)..."
+        )
         stored_values = load_original_tag_values(data_snapshot_path)
         tag_matches = match_against_stored_tags(merged, stored_values, ocr_frame.shape)
         existing_bboxes = [r["bbox"] for r in phi_regions]
@@ -148,7 +161,9 @@ def anonymize_dicom_file(input_path, before_output_path, output_path,
         ]
 
         # ── Bbox visualization: save the frame with PHI regions boxed ─────────
-        bbox_output_path = os.path.join(os.path.dirname(before_output_path), BBOX_IMAGE_NAME)
+        bbox_output_path = os.path.join(
+            os.path.dirname(before_output_path), BBOX_IMAGE_NAME
+        )
         save_bbox_image(ocr_frame, phi_regions, bbox_output_path)
         audit["bbox_image_path"] = bbox_output_path
 
@@ -188,13 +203,17 @@ def anonymize_dicom_file(input_path, before_output_path, output_path,
         # ── Checkpoint: pixels redacted, tags still original ─────────────────
         os.makedirs(os.path.dirname(before_output_path), exist_ok=True)
         ds.save_as(before_output_path, write_like_original=False)
-        log.info(f"  [Checkpoint] Pixel-redacted DICOM saved (tags still original): {before_output_path}")
+        log.info(
+            f"  [Checkpoint] Pixel-redacted DICOM saved (tags still original): {before_output_path}"
+        )
 
         # ── Last: tag de-identification (hash PatientID, mask dates, etc.) ────
         if ENABLE_TAG_DEIDENTIFICATION:
             audit["deidentified_tags"] = deidentify_dataset(ds, keystore)
         else:
-            log.info("  Tag de-identification skipped (DICOM header tags preserved 100% untouched).")
+            log.info(
+                "  Tag de-identification skipped (DICOM header tags preserved 100% untouched)."
+            )
             audit["deidentified_tags"] = []
 
         # ── Save as DICOM ONLY ────────────────────────────────────────────────
@@ -207,13 +226,20 @@ def anonymize_dicom_file(input_path, before_output_path, output_path,
 
         # Also save normalized 8-bit preview PNG for quick inspection
         try:
-            vis_source = cleaned_pixels_final[0] if cleaned_pixels_final.ndim == 3 else cleaned_pixels_final
+            vis_source = (
+                cleaned_pixels_final[0]
+                if cleaned_pixels_final.ndim == 3
+                else cleaned_pixels_final
+            )
             pmin, pmax = np.percentile(vis_source, (1.0, 99.0))
             if pmax > pmin:
-                preview_8 = np.clip((vis_source - pmin) / (pmax - pmin) * 255.0, 0, 255).astype(np.uint8)
+                preview_8 = np.clip(
+                    (vis_source - pmin) / (pmax - pmin) * 255.0, 0, 255
+                ).astype(np.uint8)
             else:
                 preview_8 = vis_source.astype(np.uint8)
             import cv2
+
             preview_p = os.path.join(os.path.dirname(output_path), "after_preview.png")
             cv2.imwrite(preview_p, preview_8)
         except Exception as pe:

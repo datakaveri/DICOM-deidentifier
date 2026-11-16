@@ -15,7 +15,6 @@ def enhance_image(image_8bit):
     """
     variants = {
         "standard": image_8bit,
-
         # --- UNCOMMENT BELOW TO ENABLE ADVANCED VARIANTS ---
         # "clahe": cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8)).apply(image_8bit),
         # "adaptive_thresh": cv2.adaptiveThreshold(image_8bit, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 15, 5),
@@ -29,4 +28,3 @@ def enhance_image(image_8bit):
     }
 
     return variants
-

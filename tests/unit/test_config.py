@@ -4,11 +4,17 @@ import os
 
 def _reload_config():
     import config
+
     return importlib.reload(config)
 
 
 def test_defaults_resolve_under_app_dir():
-    for var in ("SKALD_DATA_DIR", "SKALD_CONFIG_DIR", "SKALD_OUTPUT_DIR", "SKALD_KEYS_DIR"):
+    for var in (
+        "SKALD_DATA_DIR",
+        "SKALD_CONFIG_DIR",
+        "SKALD_OUTPUT_DIR",
+        "SKALD_KEYS_DIR",
+    ):
         os.environ.pop(var, None)
     config = _reload_config()
 
