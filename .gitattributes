@@ -1,0 +1,7 @@
+# Normalise line endings: LF in the repository and the working tree.
+* text=auto eol=lf
+
+# Binary formats that must never be diffed or normalised.
+*.dcm binary
+*.png binary
+*.jpg binary
