@@ -51,7 +51,13 @@ ENABLE_TAG_DEIDENTIFICATION = True
 # shared across every DICOM file in the batch, and saved back once at the
 # end -- so e.g. the same PatientID hashes/tokenises to the same value no
 # matter which file in the batch it appears in.
-SECURED_KEYSTORE_FILE = "secured.json"
+#
+# The file holds key material and the reverse token vault, so it must never
+# land in a directory that is shipped as the release. SKALD_KEYS_DIR places it
+# (the container sets /app/keys, a separate volume from /app/output); it
+# defaults to the working directory, where earlier versions always wrote it.
+KEYS_DIR = os.getenv("SKALD_KEYS_DIR", os.getcwd())
+SECURED_KEYSTORE_FILE = os.path.join(KEYS_DIR, "secured.json")
 
 # Identifier fields that function as an ID but whose keyword doesn't end in
 # "ID"/"IDs" (so the generic suffix check below wouldn't catch them).
