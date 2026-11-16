@@ -1,0 +1,4 @@
+# Lock inputs that cannot be expressed in pyproject.toml.
+# The runtime dependencies themselves live in pyproject.toml [project.dependencies].
+# Regenerate requirements.lock with scripts/lock.sh; never edit the lock by hand.
+en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1-py3-none-any.whl
