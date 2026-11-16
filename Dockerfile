@@ -1,88 +1,146 @@
-# ==============================================================================
-# DICOM De-Identification Pipeline — Production Container
-# ==============================================================================
+# =============================================================================
+# DICOM De-Identifier — multi-stage, non-root, offline-capable image
 #
-# Processes radiology DICOM files (.dcm) at two levels in a single unified pass:
-#   1. Burned-In Pixel Text Redaction:
-#      - Primary OCR: PaddleOCR (PP-OCRv4)
-#      - Multi-Model PHI Classification: Stanford De-ID, Biomedical NER, GLiNER,
-#        Microsoft Presidio, Regex PII patterns, and Clinical Allowlist
-#      - Character Stroke & Shadow Segmentation: Top-Hat + Drop-shadow capture
-#      - Unified Inpainting: Navier-Stokes neighbor reconstruction
-#      - Verification: Two-tier fast morphological stroke gate with OCR fallback
-#   2. DICOM Header Tag De-Identification:
-#      - Per-tag tokenization, hashing, AES-CBC format-preserving encryption,
-#        masking, and UID regeneration per DICOM PS 3.15 Profile (secured.json).
+# Removes PHI from radiology DICOM files in one batch pass:
+#   1. Burned-in pixel text: PaddleOCR detection, multi-model PHI
+#      classification (Presidio, Stanford De-ID, biomedical NER, GLiNER,
+#      regex), stroke segmentation and Navier-Stokes inpainting, verification.
+#   2. Header tags: hashing, tokenisation, masking, suppression and UID
+#      regeneration per app/de_identification/tag_mapping.py.
 #
-# CPU-only by default — no CUDA runtime required. To build for GPU, swap the
-# CPU PyTorch/Paddle wheels for CUDA builds.
-# All model weights are baked in during build time for air-gapped/offline execution.
-# ==============================================================================
+# Stage 1 (builder): compilers, the locked Python environment, and every model
+#                    weight (OCR, NER, spaCy). Nothing from this stage reaches
+#                    the final image except /opt/venv, the model caches and
+#                    the application source.
+# Stage 2 (runtime): the slim base plus the shared libraries OpenCV, Paddle
+#                    and PyTorch load at run time. No compiler, git or curl.
+#
+# torch and paddlepaddle are runtime dependencies, so they are in both stages'
+# /opt/venv; the builder is what keeps their build tooling, pip caches and
+# download layers out of the final image.
+#
+# I/O contract (the process runs as uid:gid 65532:65532):
+#   Mount input DICOMs  →  /app/data     (read-only is fine)
+#   Mount config        →  /app/config   (read-only is fine)
+#   Read results from   →  /app/output   (writable by 65532)
+#   Key material in     →  /app/keys     (writable by 65532; NEVER ship it —
+#                                         secured.json holds the hash keys and
+#                                         the reverse token vault)
+# Host directories bind-mounted at /app/output and /app/keys must be writable
+# by uid 65532 (`chown 65532:65532 output keys`), or run with
+# `--user "$(id -u):$(id -g)"`.
+#
+# The image runs fully offline: all weights are baked in at build time and
+# HF_HUB_OFFLINE / TRANSFORMERS_OFFLINE stop any download attempt at run time.
+# CPU-only; for GPU, swap the CPU torch/paddle wheels in requirements.lock.
+# =============================================================================
 
-FROM python:3.10-slim
+# ── Stage 1: Build ────────────────────────────────────────────────────────────
+# Both stages use the same base, pinned by digest so builds are reproducible.
+# Bump the tag and digest together in both FROM lines (Dependabot's docker
+# ecosystem does this) and keep BASE_IMAGE in scripts/lock.sh on the same image.
+FROM python:3.12.16-slim@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b AS builder
 
-# Prevent interactive prompts during installation
-ENV DEBIAN_FRONTEND=noninteractive
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_DEFAULT_TIMEOUT=300 \
+    PIP_RETRIES=5 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
 
-# System libraries required by opencv-python-headless, PaddleOCR, PyTorch, and downloads
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates \
-        curl \
-        git \
-        libgl1 \
-        libglib2.0-0 \
-        libsm6 \
-        libxext6 \
-        libxrender1 \
-        libgomp1 \
-        gcc \
-        g++ \
+# gcc/g++ for any sdist without a cp312 wheel; libgl1/libglib2.0-0/libgomp1 so
+# the model warm-up below can import OpenCV, Paddle and PyTorch.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        gcc g++ libgl1 libglib2.0-0 libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
+RUN python -m venv /opt/venv
+ENV PATH=/opt/venv/bin:$PATH
+
+# Every package, torch's CPU wheel and the spaCy model included, is pinned
+# with hashes in requirements.lock (generated by scripts/lock.sh). The lock
+# carries its own --index-url / --extra-index-url lines.
+COPY requirements.lock /tmp/requirements.lock
+RUN pip install --require-hashes --no-deps -r /tmp/requirements.lock \
+    && pip check
+
+# Model caches live outside any home directory so the runtime user can read
+# them but not modify them.
+ENV HF_HOME=/opt/models/huggingface \
+    PADDLE_OCR_BASE_DIR=/opt/models/paddleocr \
+    PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
+
+COPY app/ /app/
 WORKDIR /app
 
-# Upgrade pip and configure network resiliency & environment variables
-RUN pip install --upgrade pip
-ENV PIP_DEFAULT_TIMEOUT=300 \
-    PIP_RETRIES=5 \
+# Download every OCR/NLP/transformer weight now, and fail the build if
+# PaddleOCR cannot initialise: the runtime image has no network.
+RUN python -c "\
+from engines import check_gpu_available, initialize_engines; \
+p, a, d, m, g = initialize_engines(use_gpu=check_gpu_available()); \
+assert p is not None, 'PaddleOCR initialization failed'" \
+    && rm -rf /app/__pycache__ /app/*/__pycache__
+
+# Runtime directories, owned by the runtime user. keys/ is owner-only.
+RUN mkdir -p /rootfs/app/data /rootfs/app/config /rootfs/app/output /rootfs/app/keys /rootfs/home/app \
+    && chmod 0700 /rootfs/app/keys
+
+# ── Stage 2: Runtime ──────────────────────────────────────────────────────────
+FROM python:3.12.16-slim@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b AS runtime
+
+ARG VERSION=dev
+LABEL org.opencontainers.image.title="dicom-deidentifier" \
+      org.opencontainers.image.description="DICOM PHI tag and burned-in text de-identification for the SPIDEr pipeline" \
+      org.opencontainers.image.source="https://github.com/datakaveri/DICOM-deidentifier" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.version="${VERSION}"
+
+# Shared libraries only: OpenCV (libGL, glib) and OpenMP for Paddle/PyTorch.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 libgomp1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 65532 app \
+    && useradd --uid 65532 --gid 65532 --home-dir /home/app --no-create-home --shell /usr/sbin/nologin app
+
+# Root-owned and read-only for the runtime user: the interpreter, packages,
+# model weights and source cannot be altered by a compromised run.
+COPY --from=builder /opt/venv /opt/venv
+COPY --from=builder /opt/models /opt/models
+COPY --from=builder /app /app
+COPY --from=builder --chown=65532:65532 /rootfs/app/data /app/data
+COPY --from=builder --chown=65532:65532 /rootfs/app/config /app/config
+COPY --from=builder --chown=65532:65532 /rootfs/app/output /app/output
+COPY --from=builder --chown=65532:65532 /rootfs/app/keys /app/keys
+COPY --from=builder --chown=65532:65532 /rootfs/home/app /home/app
+
+ENV PATH=/opt/venv/bin:$PATH \
+    HOME=/home/app \
+    PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app \
     PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python \
-    HF_HOME=/root/.cache/huggingface \
-    PADDLE_HOME=/root/.paddleocr
-
-# Install CPU-only PyTorch and torchvision explicitly to avoid massive CUDA wheels
-# torch>=2.5.0 is required by modern transformers
-RUN pip install --no-cache-dir "torch>=2.5.0" torchvision \
-        --extra-index-url https://download.pytorch.org/whl/cpu
-
-# Install CPU-only PaddlePaddle explicitly (avoids Windows/CUDA issues)
-RUN pip install --no-cache-dir paddlepaddle==2.6.2
-
-# Install Python requirements
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Download spaCy model separately (better layer caching)
-RUN pip install --no-cache-dir \
-        https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1-py3-none-any.whl
-
-# Copy application source code
-COPY app/ .
-
-# Pre-download OCR (PaddleOCR), NLP, and Transformer model weights at BUILD time.
-# Ensures the container can run in 100% air-gapped / offline healthcare environments.
-RUN python -c "from engines import check_gpu_available, initialize_engines; p, a, d, m, g = initialize_engines(use_gpu=check_gpu_available()); assert p is not None, 'PaddleOCR initialization failed!'"
-
-# Ensure model cache is readable for any runtime user
-RUN chmod -R 777 /root || true
-
-# Create standard runtime directories
-RUN mkdir -p /app/data /app/config /app/output
-
-ENV SKALD_DATA_DIR=/app/data \
+    HF_HOME=/opt/models/huggingface \
+    PADDLE_OCR_BASE_DIR=/opt/models/paddleocr \
+    HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1 \
+    SKALD_DATA_DIR=/app/data \
     SKALD_CONFIG_DIR=/app/config \
-    SKALD_OUTPUT_DIR=/app/output
+    SKALD_OUTPUT_DIR=/app/output \
+    SKALD_KEYS_DIR=/app/keys
 
-# Default entry point runs the batch pipeline across all DICOMs in /app/data
-CMD ["python", "main.py"]
+WORKDIR /app
+
+# Non-root: a compromised or misconfigured run cannot write outside its volumes.
+USER 65532:65532
+
+VOLUME ["/app/data", "/app/config", "/app/output", "/app/keys"]
+
+# This is a one-shot batch job with no listening port, so there is nothing to
+# probe over the network. The check proves the interpreter and the heavy
+# native stacks (pydicom, OpenCV, PaddleOCR) still import in this image.
+HEALTHCHECK --interval=60s --timeout=60s --start-period=30s --retries=1 \
+    CMD ["python", "-c", "import pydicom, cv2, paddleocr"]
+
+CMD ["python", "/app/main.py"]

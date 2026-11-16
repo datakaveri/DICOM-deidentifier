@@ -1,22 +1,14 @@
-.git/
-.gitignore
-.github/
+# Build context: only what the Dockerfile copies (requirements.lock, app/).
+# Everything else is excluded so patient data, keys and local environments can
+# never be baked into an image layer by accident.
+*
 
-venv/
-.venv/
-__pycache__/
-*.pyc
-.pytest_cache/
-
-app/data/*
-!app/data/.gitkeep
-app/config/*
-!app/config/.gitkeep
+!requirements.lock
+!app/
+app/**/__pycache__
+app/data/
+app/config/
 app/output/
 app/de_identification/keystore/
-
-raw_telanagana_dicom_dataset/
-
-tests/
-README.md
-*.md
+**/*.dcm
+**/secured.json
