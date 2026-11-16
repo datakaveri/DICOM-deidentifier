@@ -1,19 +1,26 @@
 version: 2
 updates:
-  - package-ecosystem: "pip"
-    directory: "/"
+  # Reads pyproject.toml. requirements.lock / requirements-dev.lock are hashed
+  # locks that Dependabot cannot regenerate: after merging a bump, run
+  # scripts/lock.sh in the same PR (CI's audit job also covers transitive
+  # packages Dependabot never sees).
+  - package-ecosystem: pip
+    directory: /
     schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 10
+      interval: weekly
+    groups:
+      pip-minor-patch:
+        update-types: [minor, patch]
 
-  - package-ecosystem: "docker"
-    directory: "/"
+  - package-ecosystem: docker
+    directory: /
     schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 5
+      interval: weekly
 
-  - package-ecosystem: "github-actions"
-    directory: "/"
+  - package-ecosystem: github-actions
+    directory: /
     schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 5
+      interval: weekly
+    groups:
+      actions:
+        update-types: [minor, patch]
