@@ -9,6 +9,10 @@ import cv2
 
 from config import log
 
+# PNG compression level 1: same pixels, several times faster to encode than
+# OpenCV's default level 3 on full-size radiographs.
+PNG_FAST = [cv2.IMWRITE_PNG_COMPRESSION, 1]
+
 
 def save_bbox_image(gray_frame, phi_regions, out_path):
     """
@@ -22,5 +26,5 @@ def save_bbox_image(gray_frame, phi_regions, out_path):
         cv2.rectangle(display, (x1, y1), (x2, y2), (0, 0, 255), 2)
 
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    cv2.imwrite(out_path, display)
+    cv2.imwrite(out_path, display, PNG_FAST)
     log.info(f"  Bounding-box visualization saved -> {out_path}")

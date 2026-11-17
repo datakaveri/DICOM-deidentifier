@@ -37,6 +37,33 @@ except Exception:
     GLINER_AVAILABLE = False
 
 
+class LazyGLiNER:
+    """
+    Loads GLiNER on its first prediction. It is the largest model (~2.3 GB
+    resident, the slowest to load) and classify_phi only consults it when
+    no cheaper signal has settled a string, so short batches often never
+    need it. A load failure behaves exactly like GLiNER being unavailable:
+    no GLiNER labels.
+    """
+
+    def __init__(self, name):
+        self.name = name
+        self._model = None
+        self._failed = False
+
+    def predict_entities(self, *args, **kwargs):
+        if self._model is None and not self._failed:
+            try:
+                self._model = GLiNER.from_pretrained(self.name)
+                print("  [OK] GLiNER-BioMed model loaded on first use")
+            except Exception as e:
+                self._failed = True
+                print(f"  [WARN] GLiNER model failed to init: {e}")
+        if self._model is None:
+            return []
+        return self._model.predict_entities(*args, **kwargs)
+
+
 def check_gpu_available():
     """Checks if a GPU is available via PyTorch or Paddle."""
     try:
@@ -56,19 +83,32 @@ def check_gpu_available():
     return False
 
 
-def initialize_engines(use_gpu=False):
+def initialize_engines(use_gpu=False, cpu_threads=None, lazy_gliner=False):
     """
     Initializes PaddleOCR as the sole OCR engine.
     Also initializes Presidio Analyzer, Stanford De-ID, Biomedical NER, and GLiNER.
+
+    cpu_threads caps Paddle's CPU math threads per process (PaddleOCR 2.x
+    defaults to 10, which oversubscribes the CPU once several workers run).
+    The predictor fixes it at creation, so pass the per-worker value here.
+
+    lazy_gliner defers loading GLiNER until a string needs it. Use it for a
+    single-process run; with forked workers load it eagerly so every worker
+    shares one copy instead of loading its own.
     """
-    print(f"\nInitializing OCR and AI engines (GPU={use_gpu})...")
+    print(
+        f"\nInitializing OCR and AI engines (GPU={use_gpu}, cpu_threads={cpu_threads})..."
+    )
+    paddle_threads = {"cpu_threads": cpu_threads} if cpu_threads else {}
 
     paddle_ocr = None
     if PADDLE_AVAILABLE:
         try:
             # Native PaddleOCR (Linux/Ubuntu - PP-OCRv4 models)
             # Try with use_gpu parameter first (older PaddleOCR)
-            paddle_ocr = PaddleOCR(use_angle_cls=False, lang="en", use_gpu=use_gpu)
+            paddle_ocr = PaddleOCR(
+                use_angle_cls=False, lang="en", use_gpu=use_gpu, **paddle_threads
+            )
             print("  [OK] PaddleOCR (Native) initialized as PRIMARY OCR")
         except (TypeError, ValueError) as e:
             try:
@@ -136,7 +176,10 @@ def initialize_engines(use_gpu=False):
             print(f"  [WARN] Biomedical NER model failed to init: {e}")
 
     gliner_model = None
-    if GLINER_AVAILABLE:
+    if GLINER_AVAILABLE and lazy_gliner:
+        gliner_model = LazyGLiNER("urchade/gliner_large-v2.1")
+        print("  [OK] GLiNER-BioMed model will load on first use")
+    elif GLINER_AVAILABLE:
         try:
             gliner_model = GLiNER.from_pretrained("urchade/gliner_large-v2.1")
             print("  [OK] GLiNER-BioMed model initialized")

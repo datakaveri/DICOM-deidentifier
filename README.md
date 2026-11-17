@@ -103,6 +103,12 @@ The container processes every `.dcm` file in `/app/data` and writes anonymized o
 | `SKALD_CONFIG_DIR` | `/app/config` | Configuration directory |
 | `SKALD_OUTPUT_DIR` | `/app/output` | Destination for anonymized files and audit logs |
 | `SKALD_KEYS_DIR` | `/app/keys` (image), CWD (local) | Where `secured.json` (keys + token vault) is read and written |
+| `SKALD_WORKERS` | auto | Worker processes. Auto: one per ~8 CPUs, capped by free memory and file count; `1` runs everything in one process |
+| `SKALD_THREADS_PER_WORKER` | auto | Math-library threads per worker (default: CPUs ÷ workers) |
+| `SKALD_FILE_TIMEOUT_S` | `900` | Seconds one file may take before a worker counts as hung; the batch then finishes serially |
+| `SKALD_MODEL_MEMORY_MB` / `SKALD_WORKER_MEMORY_MB` | `4500` / `1500` | Memory estimates used to size the worker pool |
+
+The image sizes itself to the machine it lands on (CPU affinity, cgroup CPU and memory limits, available memory), so the same image runs on an unknown TEE VM without tuning. See [`docs/performance.md`](docs/performance.md).
 
 ---
 
