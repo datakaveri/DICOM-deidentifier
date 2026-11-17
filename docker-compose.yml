@@ -2,14 +2,13 @@ services:
   dicom-deidentifier:
     build:
       context: .
-      dockerfile: Dockerfile
+    image: skald-dicom:dev
     container_name: dicom-deidentifier
-    environment:
-      - SKALD_DATA_DIR=/app/data
-      - SKALD_CONFIG_DIR=/app/config
-      - SKALD_OUTPUT_DIR=/app/output
+    # The image runs as uid 65532; ./output and ./keys must be writable by it
+    # (`sudo chown 65532:65532 output keys`).
     volumes:
-      - ./data:/app/data
-      - ./config:/app/config
+      - ./data:/app/data:ro
+      - ./config:/app/config:ro
       - ./output:/app/output
+      - ./keys:/app/keys
     restart: "no"

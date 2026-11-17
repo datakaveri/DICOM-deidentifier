@@ -23,6 +23,7 @@ from .pyffx_compat import fpe_encrypt
 
 # ── Key / salt generation ────────────────────────────────────────────────────
 
+
 def generate_random_key_hex(nbytes: int = 16) -> str:
     """Random 32-hex-char (16-byte) key, analogous to the Rust /dev/urandom read."""
     return os.urandom(nbytes).hex()
@@ -34,6 +35,7 @@ def generate_random_salt_hex(nbytes: int = 32) -> str:
 
 
 # ── Hashing ──────────────────────────────────────────────────────────────────
+
 
 def hash_hex(value: str) -> str:
     """SHA-256 hex digest (matches Python hashlib.sha256(...).hexdigest())."""
@@ -56,6 +58,7 @@ def hash_hex_keyed(key: str, message: str) -> str:
 
 # ── Value guards ─────────────────────────────────────────────────────────────
 
+
 def should_skip_value(value) -> bool:
     """True when `value` should be left unchanged (empty or 'nan')."""
     if value is None:
@@ -65,6 +68,7 @@ def should_skip_value(value) -> bool:
 
 
 # ── JSON key-store helpers ───────────────────────────────────────────────────
+
 
 def read_json_map_string(path: str) -> dict:
     """Reads a JSON file as a flat str->str map; {} if the file is absent."""
@@ -88,6 +92,7 @@ def write_json_pretty(path: str, value) -> None:
 
 # ── HMAC key derivation ───────────────────────────────────────────────────────
 
+
 def derive_key(master_key: str, context: str) -> bytes:
     """
     Derives a 16-byte sub-key from `master_key` and a domain `context` string
@@ -100,6 +105,7 @@ def derive_key(master_key: str, context: str) -> bytes:
 
 
 # ── Format-preserving encryption ─────────────────────────────────────────────
+
 
 def format_preserving_encrypt_general(value: str, master_key: str, column: str) -> str:
     """
@@ -173,9 +179,14 @@ def fpe_pan_encrypt(value: str, master_key: str) -> str:
     """
     if (
         len(value) != 10
-        or not value[:5].isascii() or not value[:5].isupper() or not value[:5].isalpha()
-        or not value[5:9].isascii() or not value[5:9].isdigit()
-        or not value[9].isascii() or not value[9].isupper() or not value[9].isalpha()
+        or not value[:5].isascii()
+        or not value[:5].isupper()
+        or not value[:5].isalpha()
+        or not value[5:9].isascii()
+        or not value[5:9].isdigit()
+        or not value[9].isascii()
+        or not value[9].isupper()
+        or not value[9].isalpha()
     ):
         return value
 

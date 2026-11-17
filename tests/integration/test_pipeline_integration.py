@@ -1,6 +1,7 @@
 """
 Integration test for the DICOM de-identification pipeline components.
 """
+
 import re
 from config import CLINICAL_ALLOWLIST, PII_PATTERNS
 from classify import _is_clinical

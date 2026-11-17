@@ -28,8 +28,8 @@ DICOM tag — only CSV columns.
 
 import re
 
-
 # ── Regex pattern kind ────────────────────────────────────────────────────────
+
 
 class RegexPatternKind:
     """Either a literal regex string, or a semantic descriptor converted to
@@ -38,7 +38,9 @@ class RegexPatternKind:
     LITERAL = "literal"
     DERIVED = "derived"
 
-    def __init__(self, kind, regex=None, pattern_type=None, delimiter=None, start=None, end=None):
+    def __init__(
+        self, kind, regex=None, pattern_type=None, delimiter=None, start=None, end=None
+    ):
         self.kind = kind
         self.regex = regex
         self.pattern_type = pattern_type
@@ -51,20 +53,38 @@ class RegexPatternKind:
         return RegexPatternKind(RegexPatternKind.LITERAL, regex=regex)
 
     @staticmethod
-    def derived(pattern_type: str = "", delimiter=None, start=None, end=None) -> "RegexPatternKind":
-        return RegexPatternKind(RegexPatternKind.DERIVED, pattern_type=pattern_type,
-                                 delimiter=delimiter, start=start, end=end)
+    def derived(
+        pattern_type: str = "", delimiter=None, start=None, end=None
+    ) -> "RegexPatternKind":
+        return RegexPatternKind(
+            RegexPatternKind.DERIVED,
+            pattern_type=pattern_type,
+            delimiter=delimiter,
+            start=start,
+            end=end,
+        )
 
 
 class RegexPatternConfig:
     """Per-pattern masking configuration within a column's regex_patterns list."""
 
-    def __init__(self, kind: RegexPatternKind, masking_char: str = "*", length=None,
-                 mask_groups=None, pattern_type=None, delimiter=None, start=None, end=None):
+    def __init__(
+        self,
+        kind: RegexPatternKind,
+        masking_char: str = "*",
+        length=None,
+        mask_groups=None,
+        pattern_type=None,
+        delimiter=None,
+        start=None,
+        end=None,
+    ):
         self.kind = kind
         self.masking_char = masking_char
         self.length = length
-        self.mask_groups = mask_groups or []  # list of (group_idx: int, mode: "full"|"partial")
+        self.mask_groups = (
+            mask_groups or []
+        )  # list of (group_idx: int, mode: "full"|"partial")
         # Stored regardless of `kind` so delimiter-length masking fires even
         # when a literal `regex` is also present (matches the Rust source).
         self.pattern_type = pattern_type
@@ -76,20 +96,31 @@ class RegexPatternConfig:
 class MaskingConfigLite:
     """Full masking configuration for one column/tag."""
 
-    def __init__(self, column: str, masking_char: str = "*", characters_to_mask=None,
-                 regex_patterns=None, apply_order=None, class_masking_mode=None,
-                 class_letter: str = "X", class_digit: str = "0"):
+    def __init__(
+        self,
+        column: str,
+        masking_char: str = "*",
+        characters_to_mask=None,
+        regex_patterns=None,
+        apply_order=None,
+        class_masking_mode=None,
+        class_letter: str = "X",
+        class_digit: str = "0",
+    ):
         self.column = column
         self.masking_char = masking_char
         self.characters_to_mask = characters_to_mask or []  # 1-based positions
         self.regex_patterns = regex_patterns or []
         self.apply_order = apply_order or ["characters", "regex", "class"]
-        self.class_masking_mode = class_masking_mode  # "random_class" | "fixed_class" | None
+        self.class_masking_mode = (
+            class_masking_mode  # "random_class" | "fixed_class" | None
+        )
         self.class_letter = class_letter
         self.class_digit = class_digit
 
 
 # ── Config parsing ────────────────────────────────────────────────────────────
+
 
 def parse_masking_config(entry: dict) -> MaskingConfigLite:
     """Parses a single masking config entry (dict) into a MaskingConfigLite."""
@@ -140,12 +171,22 @@ def parse_masking_config(entry: dict) -> MaskingConfigLite:
         if pat.get("regex"):
             kind = RegexPatternKind.literal(pat["regex"])
         else:
-            kind = RegexPatternKind.derived(pattern_type_val or "", delimiter_val, start_val, end_val)
+            kind = RegexPatternKind.derived(
+                pattern_type_val or "", delimiter_val, start_val, end_val
+            )
 
-        regex_patterns.append(RegexPatternConfig(
-            kind=kind, masking_char=pat_masking_char, length=length, mask_groups=mask_groups,
-            pattern_type=pattern_type_val, delimiter=delimiter_val, start=start_val, end=end_val,
-        ))
+        regex_patterns.append(
+            RegexPatternConfig(
+                kind=kind,
+                masking_char=pat_masking_char,
+                length=length,
+                mask_groups=mask_groups,
+                pattern_type=pattern_type_val,
+                delimiter=delimiter_val,
+                start=start_val,
+                end=end_val,
+            )
+        )
 
     apply_order = entry.get("apply_order") or ["characters", "regex", "class"]
     class_masking_mode = entry.get("class_masking_mode")
@@ -155,13 +196,19 @@ def parse_masking_config(entry: dict) -> MaskingConfigLite:
     class_digit = class_digit_s[0] if class_digit_s else "0"
 
     return MaskingConfigLite(
-        column=column, masking_char=masking_char, characters_to_mask=characters_to_mask,
-        regex_patterns=regex_patterns, apply_order=apply_order,
-        class_masking_mode=class_masking_mode, class_letter=class_letter, class_digit=class_digit,
+        column=column,
+        masking_char=masking_char,
+        characters_to_mask=characters_to_mask,
+        regex_patterns=regex_patterns,
+        apply_order=apply_order,
+        class_masking_mode=class_masking_mode,
+        class_letter=class_letter,
+        class_digit=class_digit,
     )
 
 
 # ── Regex helpers ─────────────────────────────────────────────────────────────
+
 
 def derive_regex(pattern_type: str, delimiter=None, start=None, end=None) -> str:
     """
@@ -183,7 +230,9 @@ def derive_regex(pattern_type: str, delimiter=None, start=None, end=None) -> str
     return ""
 
 
-def apply_delimiter_length_mask(text: str, pattern_type: str, delimiter: str, length: int, mask_char: str):
+def apply_delimiter_length_mask(
+    text: str, pattern_type: str, delimiter: str, length: int, mask_char: str
+):
     """
     Masks `length` characters immediately before ("before") or after
     ("after") every occurrence of `delimiter` in `text`.
@@ -220,12 +269,15 @@ def apply_delimiter_length_mask(text: str, pattern_type: str, delimiter: str, le
     return "".join(chars), changed
 
 
-def apply_regex_group_mask(value: str, compiled: "re.Pattern", mask_groups, default_mask: str) -> str:
+def apply_regex_group_mask(
+    value: str, compiled: "re.Pattern", mask_groups, default_mask: str
+) -> str:
     """
     Applies group-based masking to all matches of `compiled` in `value`.
     "full" -> replace every character with default_mask.
     "partial" -> keep the first character, replace the rest.
     """
+
     def _replace(m: "re.Match") -> str:
         rebuilt = m.group(0)
         for group_idx, mode in mask_groups:
@@ -265,7 +317,9 @@ def apply_regex_pattern(value: str, pat: RegexPatternConfig, column: str) -> str
         pattern_type = pat.pattern_type or ""
         delimiter = pat.delimiter or ""
         if delimiter and pattern_type in ("before", "after"):
-            result, changed = apply_delimiter_length_mask(value, pattern_type, delimiter, pat.length, mask_char)
+            result, changed = apply_delimiter_length_mask(
+                value, pattern_type, delimiter, pat.length, mask_char
+            )
             if changed:
                 return result
 
@@ -273,7 +327,9 @@ def apply_regex_pattern(value: str, pat: RegexPatternConfig, column: str) -> str
     if pat.kind.kind == RegexPatternKind.LITERAL:
         regex_str = pat.kind.regex or ""
     else:
-        regex_str = derive_regex(pat.kind.pattern_type, pat.kind.delimiter, pat.kind.start, pat.kind.end)
+        regex_str = derive_regex(
+            pat.kind.pattern_type, pat.kind.delimiter, pat.kind.start, pat.kind.end
+        )
 
     if not regex_str:
         return value
@@ -281,7 +337,9 @@ def apply_regex_pattern(value: str, pat: RegexPatternConfig, column: str) -> str
     try:
         compiled = re.compile(regex_str)
     except re.error:
-        derived = derive_regex(pat.pattern_type or "", pat.delimiter, pat.start, pat.end)
+        derived = derive_regex(
+            pat.pattern_type or "", pat.delimiter, pat.start, pat.end
+        )
         if not derived:
             return value
         try:
@@ -299,7 +357,7 @@ def apply_regex_pattern(value: str, pat: RegexPatternConfig, column: str) -> str
     out = []
     last = 0
     for m in compiled.finditer(value):
-        out.append(value[last:m.start()])
+        out.append(value[last : m.start()])
         out.append(mask_char * len(m.group(0)))
         last = m.end()
     out.append(value[last:])

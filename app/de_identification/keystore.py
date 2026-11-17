@@ -36,10 +36,13 @@ class KeyStore:
         if not os.path.exists(self.path):
             return {}
         import json
+
         with open(self.path, "r", encoding="utf-8") as f:
             return json.load(f)
 
-    def tokenise(self, column: str, value: str, prefix: str = "TK-", digits: int = 6) -> str:
+    def tokenise(
+        self, column: str, value: str, prefix: str = "TK-", digits: int = 6
+    ) -> str:
         """
         Returns the existing token for (column, value) if already minted,
         otherwise mints the next sequential token and records both

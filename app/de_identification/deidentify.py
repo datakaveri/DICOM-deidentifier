@@ -51,12 +51,14 @@ def _walk(ds, keystore, audit) -> None:
         if elem.VR == "SQ":
             mapping = TAG_MAPPING.get(tag_id)
             if (mapping and mapping["technique"] == SUPPRESS) or is_private:
-                audit.append({
-                    "tag": str(elem.tag),
-                    "field": elem.keyword or "(private)",
-                    "technique": SUPPRESS,
-                    "action": "deleted-sequence",
-                })
+                audit.append(
+                    {
+                        "tag": str(elem.tag),
+                        "field": elem.keyword or "(private)",
+                        "technique": SUPPRESS,
+                        "action": "deleted-sequence",
+                    }
+                )
                 del ds[elem.tag]
                 continue
             for item in elem.value:
@@ -64,12 +66,14 @@ def _walk(ds, keystore, audit) -> None:
             continue
 
         if is_private:
-            audit.append({
-                "tag": str(elem.tag),
-                "field": "(private)",
-                "technique": SUPPRESS,
-                "action": "deleted-private-tag",
-            })
+            audit.append(
+                {
+                    "tag": str(elem.tag),
+                    "field": "(private)",
+                    "technique": SUPPRESS,
+                    "action": "deleted-private-tag",
+                }
+            )
             del ds[elem.tag]
             continue
 
@@ -80,25 +84,36 @@ def _walk(ds, keystore, audit) -> None:
         technique = mapping["technique"]
 
         if technique == SUPPRESS:
-            audit.append({
-                "tag": str(elem.tag), "field": elem.keyword,
-                "technique": SUPPRESS, "action": "deleted",
-            })
+            audit.append(
+                {
+                    "tag": str(elem.tag),
+                    "field": elem.keyword,
+                    "technique": SUPPRESS,
+                    "action": "deleted",
+                }
+            )
             del ds[elem.tag]
             continue
 
         raw_value = elem.value
         value = str(raw_value).strip() if raw_value is not None else ""
         if should_skip_value(value):
-            audit.append({
-                "tag": str(elem.tag), "field": elem.keyword,
-                "technique": technique, "action": "skipped-empty",
-            })
+            audit.append(
+                {
+                    "tag": str(elem.tag),
+                    "field": elem.keyword,
+                    "technique": technique,
+                    "action": "skipped-empty",
+                }
+            )
             continue
 
         elem.value = apply_technique(technique, value, elem, keystore, tag_id)
-        audit.append({
-            "tag": str(elem.tag), "field": elem.keyword,
-            "technique": technique,
-            "action": "retained" if technique == "retain" else "transformed",
-        })
+        audit.append(
+            {
+                "tag": str(elem.tag),
+                "field": elem.keyword,
+                "technique": technique,
+                "action": "retained" if technique == "retain" else "transformed",
+            }
+        )

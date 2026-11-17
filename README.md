@@ -12,9 +12,12 @@ The output is always a valid `.dcm` file (with optional high-resolution `.png` v
 ## Project Layout
 
 ```
-├── Dockerfile                  # Production container definition (air-gapped & offline-ready)
-├── requirements.txt            # Pinned dependencies (PaddleOCR, PyTorch, Presidio, GLiNER)
-├── secured.json                # Shared cryptographic key and token material
+├── Dockerfile                  # Multi-stage, non-root, offline-ready production image
+├── pyproject.toml              # Version and dependency ranges (the source of truth)
+├── requirements.lock           # Hashed, fully pinned runtime lock (what the image installs)
+├── requirements-dev.lock       # Runtime lock + test/lint/audit tooling
+├── requirements.in             # Lock inputs pyproject.toml cannot express (spaCy model)
+├── scripts/lock.sh             # Regenerates both locks in the pinned base image
 ├── app/
 │   ├── main.py                 # Main batch pipeline entry point
 │   ├── config.py               # Paths, environment variables, clinical allowlist, PII regex
@@ -37,23 +40,24 @@ The output is always a valid `.dcm` file (with optional high-resolution `.png` v
 ## Running Locally
 
 ```bash
-# 1. Activate virtual environment
-python -m venv venv && source venv/bin/activate
+# 1. Create a Python 3.12 virtual environment
+python3.12 -m venv venv && source venv/bin/activate
 
-# 2. Install dependencies
-pip install -r requirements.txt
-python -m spacy download en_core_web_sm
+# 2. Install the locked dependencies (includes the spaCy model and CPU torch)
+pip install --require-hashes --no-deps -r requirements-dev.lock
 
-# 3. Run the batch pipeline
+# 3. Run the batch pipeline (keys go to SKALD_KEYS_DIR, default: the CWD).
+#    LD_PRELOAD works around paddlepaddle 2.6's bundled zlib, which otherwise
+#    segfaults on `import paddleocr`; the image sets it too (see Dockerfile).
 cd app
-python main.py
+LD_PRELOAD=/lib/x86_64-linux-gnu/libz.so.1 SKALD_KEYS_DIR=../keys python main.py
 ```
 
 ### Running Tests
 
 ```bash
-# Execute unit test suite with coverage
-pytest tests/ -v
+ruff check . && black --check .
+pytest -q
 ```
 
 ### Outputs Generated (per DICOM file)
@@ -70,18 +74,24 @@ Under `app/output/<sample_name>/`:
 ## Running with Docker
 
 ```bash
-# Build the production image (model weights are pre-cached during build)
-docker build -t dicom-deidentifier .
+# Released images (see "Versioning and releases" below)
+docker pull ghcr.io/datakaveri/skald-dicom:1.0.0
 
-# Run the batch pipeline
+# Or build locally (model weights are baked in during the build)
+docker build -t skald-dicom:dev .
+
+# The process runs as uid 65532: output/ and keys/ must be writable by it
+mkdir -p output keys && sudo chown 65532:65532 output keys
+
 docker run --rm \
-  -v /path/to/input/dicoms:/app/data \
-  -v /path/to/config:/app/config \
-  -v /path/to/output:/app/output \
-  dicom-deidentifier
+  -v /path/to/input/dicoms:/app/data:ro \
+  -v /path/to/config:/app/config:ro \
+  -v "$PWD/output":/app/output \
+  -v "$PWD/keys":/app/keys \
+  ghcr.io/datakaveri/skald-dicom:1.0.0
 ```
 
-The container processes every `.dcm` file located in `/app/data` and saves anonymized outputs and logs to `/app/output`. Model weights are embedded into the image during `docker build`, enabling fully offline, air-gapped deployment in secure clinical environments.
+The container processes every `.dcm` file in `/app/data` and writes anonymized outputs and logs to `/app/output`. Key material (`secured.json`: hash keys and the reverse token vault) goes to `/app/keys`, a separate volume: **never ship `keys/` with a release**, and reuse the same `keys/` across batches so pseudonyms stay consistent. Model weights are embedded at build time and the runtime refuses network model downloads, so the image runs fully offline.
 
 ---
 
@@ -91,4 +101,13 @@ The container processes every `.dcm` file located in `/app/data` and saves anony
 |---|---|---|
 | `SKALD_DATA_DIR` | `/app/data` | Input directory containing DICOM files (`*.dcm`) |
 | `SKALD_CONFIG_DIR` | `/app/config` | Configuration directory |
-| `SKALD_OUTPUT_DIR` | `/app/output` | Destination for anonymized files, audit logs, and keys |
+| `SKALD_OUTPUT_DIR` | `/app/output` | Destination for anonymized files and audit logs |
+| `SKALD_KEYS_DIR` | `/app/keys` (image), CWD (local) | Where `secured.json` (keys + token vault) is read and written |
+
+---
+
+## Versioning and releases
+
+The project follows [Semantic Versioning](https://semver.org/). The version lives in `pyproject.toml` and `app/__init__.py` (a unit test keeps them equal), and every change is recorded in [`CHANGELOG.md`](CHANGELOG.md).
+
+A release is an immutable tag `vMAJOR.MINOR.PATCH` on `main`. Pushing it runs [`release.yml`](.github/workflows/release.yml), which refuses a tag that does not match the version or has no dated CHANGELOG section, then publishes `ghcr.io/datakaveri/skald-dicom:<version>` (also tagged `v<version>`) and a GitHub Release with that CHANGELOG section and the image digest. `:latest` moves to each new highest release, and deployments run `:latest`; a patch to an older line never moves it. The full procedure is in [`docs/releasing.md`](docs/releasing.md).

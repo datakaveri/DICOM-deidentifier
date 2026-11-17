@@ -68,12 +68,14 @@ def identify_phi_tags(ds: pydicom.Dataset) -> list:
         else:
             continue
 
-        found.append({
-            "tag": str(elem.tag),
-            "field": keyword,
-            "category": category,
-            "value": value,
-        })
+        found.append(
+            {
+                "tag": str(elem.tag),
+                "field": keyword,
+                "category": category,
+                "value": value,
+            }
+        )
 
     return found
 
@@ -91,12 +93,14 @@ def dump_original_tags(ds: pydicom.Dataset, path: str) -> None:
             value = str(elem.value)
         except Exception:
             value = "<unreadable>"
-        snapshot.append({
-            "tag": str(elem.tag),
-            "keyword": elem.keyword,
-            "vr": elem.VR,
-            "value": value,
-        })
+        snapshot.append(
+            {
+                "tag": str(elem.tag),
+                "keyword": elem.keyword,
+                "vr": elem.VR,
+                "value": value,
+            }
+        )
 
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
@@ -165,7 +169,9 @@ def match_against_stored_tags(merged, stored_values, image_shape):
         norm_text = text.upper()
 
         hit = any(
-            norm_text == sv or (len(sv) >= 4 and norm_text in sv) or (len(norm_text) >= 4 and sv in norm_text)
+            norm_text == sv
+            or (len(sv) >= 4 and norm_text in sv)
+            or (len(norm_text) >= 4 and sv in norm_text)
             for sv in normalized_stored
         )
         if not hit:

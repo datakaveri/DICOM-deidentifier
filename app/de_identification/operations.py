@@ -27,18 +27,51 @@ Design notes:
 import uuid
 
 from .tag_mapping import (
-    SUPPRESS, HASH, TOKENISE, ENCRYPT, ENCRYPT_FPE, CHARCLOAK, MASK, SCRUB, RETAIN,
+    SUPPRESS,
+    HASH,
+    TOKENISE,
+    ENCRYPT,
+    ENCRYPT_FPE,
+    CHARCLOAK,
+    MASK,
+    SCRUB,
+    RETAIN,
     UID_VALUED_TAGS,
 )
-from .crypto import hash_hex_keyed, pseudo_encrypt, format_preserving_encrypt_general, randomize_preserving_class
-from .masking import MaskingConfigLite, RegexPatternConfig, RegexPatternKind, apply_masking_value
+from .crypto import (
+    hash_hex_keyed,
+    pseudo_encrypt,
+    format_preserving_encrypt_general,
+    randomize_preserving_class,
+)
+from .masking import (
+    MaskingConfigLite,
+    RegexPatternConfig,
+    RegexPatternKind,
+    apply_masking_value,
+)
 
 # Max character length per VR (DICOM PS3.5 Table 6.2-1), used to keep
 # hashed values valid for their declared VR.
 VR_MAX_LENGTH = {
-    "AE": 16, "AS": 4, "CS": 16, "DA": 8, "DS": 16, "DT": 26, "FL": 4, "FD": 8,
-    "IS": 12, "LO": 64, "LT": 10240, "PN": 64, "SH": 16, "ST": 1024, "TM": 16,
-    "UI": 64, "UL": 4, "US": 2,
+    "AE": 16,
+    "AS": 4,
+    "CS": 16,
+    "DA": 8,
+    "DS": 16,
+    "DT": 26,
+    "FL": 4,
+    "FD": 8,
+    "IS": 12,
+    "LO": 64,
+    "LT": 10240,
+    "PN": 64,
+    "SH": 16,
+    "ST": 1024,
+    "TM": 16,
+    "UI": 64,
+    "UL": 4,
+    "US": 2,
 }
 
 # ── "mask" technique config: DA-VR dates (YYYYMMDD) ─────────────────────────
@@ -60,14 +93,14 @@ DATE_MASK_CONFIG = MaskingConfigLite(
 # pixel pipeline's classify.py, run through the ported regex-masking engine
 # (full-match masking, since none of these patterns declare mask_groups).
 _FREE_TEXT_PII_PATTERNS = {
-    "aadhaar":     r'\b\d{4}\s?\d{4}\s?\d{4}\b',
-    "abha":        r'\b\d{2}-\d{4}-\d{4}-\d{4}\b',
-    "phone":       r'\b(?:\+91|0)?[6-9]\d{9}\b',
-    "date":        r'\b\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}\b',
-    "uhid_mrn":    r'\b(?:UHID|MRN|REG|IPD|OPD|CR|PID|HID)[\s:/-]?\d+\b',
-    "age_sex":     r'\b\d{1,3}\s*[/]\s*[MFO]\b',
-    "name_prefix": r'\b(?:DR\.?|MR\.?|MRS\.?|MS\.?|SHRI|SMT|S/O|D/O|W/O)\b',
-    "accession":   r'\b(?:ACC|ACCNO|ACCESSION)[\s:.-]?\w+\b',
+    "aadhaar": r"\b\d{4}\s?\d{4}\s?\d{4}\b",
+    "abha": r"\b\d{2}-\d{4}-\d{4}-\d{4}\b",
+    "phone": r"\b(?:\+91|0)?[6-9]\d{9}\b",
+    "date": r"\b\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}\b",
+    "uhid_mrn": r"\b(?:UHID|MRN|REG|IPD|OPD|CR|PID|HID)[\s:/-]?\d+\b",
+    "age_sex": r"\b\d{1,3}\s*[/]\s*[MFO]\b",
+    "name_prefix": r"\b(?:DR\.?|MR\.?|MRS\.?|MS\.?|SHRI|SMT|S/O|D/O|W/O)\b",
+    "accession": r"\b(?:ACC|ACCNO|ACCESSION)[\s:.-]?\w+\b",
 }
 
 FREE_TEXT_SCRUB_CONFIG = MaskingConfigLite(
@@ -140,7 +173,9 @@ def apply_technique(technique: str, value: str, elem, keystore, tag_id) -> str:
         return apply_masking_value(value, DATE_MASK_CONFIG, randomize_preserving_class)
 
     if technique == SCRUB:
-        return apply_masking_value(value, FREE_TEXT_SCRUB_CONFIG, randomize_preserving_class)
+        return apply_masking_value(
+            value, FREE_TEXT_SCRUB_CONFIG, randomize_preserving_class
+        )
 
     # Unknown technique: defensive no-op, leave value untouched.
     return value

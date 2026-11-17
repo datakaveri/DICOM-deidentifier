@@ -55,13 +55,17 @@ def verify_redaction(cleaned_array, phi_regions, paddle_ocr=None, analyzer=None)
         log.info("  [Stage 6] PASSED — no redacted regions required verification.")
         return cleaned_array, "PASSED"
 
-    log.info("  [Stage 6] Verification pass — running fast Tier 1 stroke-residual check...")
+    log.info(
+        "  [Stage 6] Verification pass — running fast Tier 1 stroke-residual check..."
+    )
     h, w = cleaned_array.shape[:2]
 
     # Convert cleaned array to 8-bit visual for fast verification
     raw_min, raw_max = cleaned_array.min(), cleaned_array.max()
     if raw_max > raw_min:
-        temp_8 = ((cleaned_array - raw_min) / (raw_max - raw_min) * 255.0).astype(np.uint8)
+        temp_8 = ((cleaned_array - raw_min) / (raw_max - raw_min) * 255.0).astype(
+            np.uint8
+        )
     else:
         temp_8 = cleaned_array.astype(np.uint8)
 
@@ -78,11 +82,15 @@ def verify_redaction(cleaned_array, phi_regions, paddle_ocr=None, analyzer=None)
             flagged_regions.append(r)
 
     if not flagged_regions:
-        log.info(f"  [Stage 6] PASSED (Tier 1) — all {len(phi_regions)} region(s) verified 100% clean.")
+        log.info(
+            f"  [Stage 6] PASSED (Tier 1) — all {len(phi_regions)} region(s) verified 100% clean."
+        )
         return cleaned_array, "PASSED"
 
     # ── Tier 2: OCR Fallback Verification (only on flagged regions) ──────────
-    log.info(f"  [Stage 6] Tier 2 Fallback — running targeted PaddleOCR on {len(flagged_regions)} flagged region(s)...")
+    log.info(
+        f"  [Stage 6] Tier 2 Fallback — running targeted PaddleOCR on {len(flagged_regions)} flagged region(s)..."
+    )
     verify_regions = []
     for r in flagged_regions:
         bx1, by1, bx2, by2 = r["bbox"]
@@ -92,13 +100,17 @@ def verify_redaction(cleaned_array, phi_regions, paddle_ocr=None, analyzer=None)
         vy2 = min(h, by2 + 20)
         verify_regions.append([vx1, vy1, vx2, vy2])
 
-    raw_det  = detect_text_in_regions(temp_8, verify_regions, paddle_ocr=paddle_ocr, run_on_regions=True)
-    merged   = merge_detections(raw_det)
+    raw_det = detect_text_in_regions(
+        temp_8, verify_regions, paddle_ocr=paddle_ocr, run_on_regions=True
+    )
+    merged = merge_detections(raw_det)
     residual = classify_phi(merged, cleaned_array.shape, analyzer)
     residual = expand_phi_blocks(merged, residual, cleaned_array.shape)
 
     if not residual:
-        log.info("  [Stage 6] PASSED (Tier 2 Fallback) — no residual PHI text detected in flagged regions.")
+        log.info(
+            "  [Stage 6] PASSED (Tier 2 Fallback) — no residual PHI text detected in flagged regions."
+        )
         return cleaned_array, "PASSED"
 
     # ── Escalation ────────────────────────────────────────────────────────────
@@ -111,13 +123,17 @@ def verify_redaction(cleaned_array, phi_regions, paddle_ocr=None, analyzer=None)
 
     for region in residual:
         x1, y1, x2, y2 = region["bbox"]
-        x1e = max(0, x1 - 10); y1e = max(0, y1 - 10)
-        x2e = min(w, x2 + 10); y2e = min(h, y2 + 10)
+        x1e = max(0, x1 - 10)
+        y1e = max(0, y1 - 10)
+        x2e = min(w, x2 + 10)
+        y2e = min(h, y2 + 10)
 
         escalated = redact_roi(escalated, x1e, y1e, x2e, y2e, pad=10)
         escalation_count += 1
         log.info(f"  [Stage 6] Escalation inpainting @ [{x1e},{y1e},{x2e},{y2e}]")
 
-    log.info(f"  [Stage 6] Escalation complete. Total escalated regions: {escalation_count}")
+    log.info(
+        f"  [Stage 6] Escalation complete. Total escalated regions: {escalation_count}"
+    )
     log.info("  [Stage 6] PASSED (Escalated — all residual text cleared).")
     return escalated, "PASSED (Escalated)"
