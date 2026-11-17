@@ -11,7 +11,7 @@ import numpy as np
 from config import log
 from ocr_detect import detect_text_in_regions
 from classify import merge_detections, classify_phi, expand_phi_blocks
-from masking import redact_roi
+from masking import redact_black, redact_roi
 
 
 def check_stroke_residual(crop_8bit):
@@ -45,11 +45,39 @@ def check_stroke_residual(crop_8bit):
     return text_like_components >= 2
 
 
-def verify_redaction(cleaned_array, phi_regions, paddle_ocr=None, analyzer=None):
+def _residual_phi(temp_8, verify_regions, shape, paddle_ocr, analyzer):
+    """PHI text OCR still finds inside `verify_regions` of the 8-bit frame."""
+    raw_det = detect_text_in_regions(
+        temp_8, verify_regions, paddle_ocr=paddle_ocr, run_on_regions=True
+    )
+    merged = merge_detections(raw_det)
+    residual = classify_phi(merged, shape, analyzer)
+    return expand_phi_blocks(merged, residual, shape)
+
+
+def _to_8bit(array):
+    raw_min, raw_max = array.min(), array.max()
+    if raw_max > raw_min:
+        return ((array - raw_min) / (raw_max - raw_min) * 255.0).astype(np.uint8)
+    return array.astype(np.uint8)
+
+
+def verify_redaction(
+    cleaned_array,
+    phi_regions,
+    paddle_ocr=None,
+    analyzer=None,
+    method="inpaint",
+    strict=False,
+):
     """
     Two-Tier Verification:
       Tier 1: Ultra-fast stroke & gradient energy check (<3ms total).
       Tier 2 (Fallback): Targeted PaddleOCR on flagged regions only if Tier 1 detects residue.
+
+    `method` is how residual PHI is escalated ("black" under a job config).
+    `strict` (the job-config path) re-runs OCR after escalation and returns
+    "FAILED" if PHI text survived, instead of assuming escalation worked.
     """
     if not phi_regions:
         log.info("  [Stage 6] PASSED — no redacted regions required verification.")
@@ -61,13 +89,7 @@ def verify_redaction(cleaned_array, phi_regions, paddle_ocr=None, analyzer=None)
     h, w = cleaned_array.shape[:2]
 
     # Convert cleaned array to 8-bit visual for fast verification
-    raw_min, raw_max = cleaned_array.min(), cleaned_array.max()
-    if raw_max > raw_min:
-        temp_8 = ((cleaned_array - raw_min) / (raw_max - raw_min) * 255.0).astype(
-            np.uint8
-        )
-    else:
-        temp_8 = cleaned_array.astype(np.uint8)
+    temp_8 = _to_8bit(cleaned_array)
 
     # ── Tier 1: Fast stroke residual check on all redacted regions ───────────
     flagged_regions = []
@@ -100,12 +122,9 @@ def verify_redaction(cleaned_array, phi_regions, paddle_ocr=None, analyzer=None)
         vy2 = min(h, by2 + 20)
         verify_regions.append([vx1, vy1, vx2, vy2])
 
-    raw_det = detect_text_in_regions(
-        temp_8, verify_regions, paddle_ocr=paddle_ocr, run_on_regions=True
+    residual = _residual_phi(
+        temp_8, verify_regions, cleaned_array.shape, paddle_ocr, analyzer
     )
-    merged = merge_detections(raw_det)
-    residual = classify_phi(merged, cleaned_array.shape, analyzer)
-    residual = expand_phi_blocks(merged, residual, cleaned_array.shape)
 
     if not residual:
         log.info(
@@ -114,9 +133,10 @@ def verify_redaction(cleaned_array, phi_regions, paddle_ocr=None, analyzer=None)
         return cleaned_array, "PASSED"
 
     # ── Escalation ────────────────────────────────────────────────────────────
+    # Count only: the recognised text is the PHI itself.
     log.warning(
-        f"  [Stage 6] Residual PHI confirmed in {len(residual)} region(s): "
-        f"{[r['text'][:30] for r in residual]}. Running escalation inpainting..."
+        f"  [Stage 6] Residual PHI confirmed in {len(residual)} region(s). "
+        "Escalating..."
     )
     escalated = cleaned_array.copy()
     escalation_count = 0
@@ -128,12 +148,29 @@ def verify_redaction(cleaned_array, phi_regions, paddle_ocr=None, analyzer=None)
         x2e = min(w, x2 + 10)
         y2e = min(h, y2 + 10)
 
-        escalated = redact_roi(escalated, x1e, y1e, x2e, y2e, pad=10)
+        if method == "black":
+            escalated = redact_black(escalated, x1e, y1e, x2e, y2e)
+        else:
+            escalated = redact_roi(escalated, x1e, y1e, x2e, y2e, pad=10)
         escalation_count += 1
-        log.info(f"  [Stage 6] Escalation inpainting @ [{x1e},{y1e},{x2e},{y2e}]")
+        log.info(f"  [Stage 6] Escalation ({method}) @ [{x1e},{y1e},{x2e},{y2e}]")
 
     log.info(
         f"  [Stage 6] Escalation complete. Total escalated regions: {escalation_count}"
     )
-    log.info("  [Stage 6] PASSED (Escalated — all residual text cleared).")
+    if not strict:
+        log.info("  [Stage 6] PASSED (Escalated — all residual text cleared).")
+        return escalated, "PASSED (Escalated)"
+
+    # Strict: confirm escalation cleared the text rather than assume it.
+    still = _residual_phi(
+        _to_8bit(escalated), verify_regions, escalated.shape, paddle_ocr, analyzer
+    )
+    if still:
+        log.error(
+            f"  [Stage 6] FAILED — {len(still)} region(s) still carry PHI text "
+            "after escalation."
+        )
+        return escalated, "FAILED"
+    log.info("  [Stage 6] PASSED (Escalated — re-verified clear).")
     return escalated, "PASSED (Escalated)"
