@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dicom-deidentifier"
-version = "1.0.0"
+version = "2.0.0"
 description = "DICOM PHI tag and burned-in text de-identification pipeline for radiology images"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"

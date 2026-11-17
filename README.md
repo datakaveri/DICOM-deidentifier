@@ -87,7 +87,7 @@ With no config file, or no `dicom_deidentify` block, the fixed policy in `app/de
 
 ```bash
 # Released images (see "Versioning and releases" below)
-docker pull ghcr.io/datakaveri/skald-dicom:1.0.0
+docker pull ghcr.io/datakaveri/skald-dicom:2.0.0
 
 # Or build locally (model weights are baked in during the build)
 docker build -t skald-dicom:dev .
@@ -100,7 +100,7 @@ docker run --rm \
   -v /path/to/config:/app/config:ro \
   -v "$PWD/output":/app/output \
   -v "$PWD/keys":/app/keys \
-  ghcr.io/datakaveri/skald-dicom:1.0.0
+  ghcr.io/datakaveri/skald-dicom:2.0.0
 ```
 
 The container processes every `.dcm` file in `/app/data` and writes anonymized outputs and logs to `/app/output`. Key material (`secured.json`: hash keys and the reverse token vault) goes to `/app/keys`: **never ship `keys/` with a release**, and mount and reuse the same `keys/` across batches so pseudonyms stay consistent. Without a mount, the keys live and die with the container. Model weights are embedded at build time and the runtime refuses network model downloads, so the image runs fully offline.
