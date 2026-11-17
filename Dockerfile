@@ -19,7 +19,7 @@
 # All model weights are baked in during build time for air-gapped/offline execution.
 # ==============================================================================
 
-FROM python:3.10-slim
+FROM python:3.15-slim
 
 # Prevent interactive prompts during installation
 ENV DEBIAN_FRONTEND=noninteractive
