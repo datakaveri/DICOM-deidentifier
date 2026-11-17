@@ -28,6 +28,7 @@ import glob
 import json
 import os
 import re
+import sys
 import time
 
 import runtime
@@ -138,6 +139,15 @@ def tag_stage(audit, keystore):
     pixel_seconds = audit.pop("pixel_stage_seconds", 0)
     audit["execution_time_seconds"] = round(pixel_seconds + time.time() - start_time, 2)
 
+    if audit.get("error"):
+        # A save that failed part-way can leave a truncated file behind;
+        # never leave anything at the de-identified output path on failure.
+        if os.path.isfile(audit["output_path"]):
+            os.remove(audit["output_path"])
+    elif not os.path.isfile(audit["output_path"]):
+        audit["error"] = "pipeline finished but wrote no output file"
+        audit["verification_status"] = "ERROR"
+
     p = _paths(audit["input_path"])
     with open(p["audit"], "w") as f:
         json.dump(audit, f, indent=2)
@@ -147,7 +157,10 @@ def tag_stage(audit, keystore):
     print(f"Redacted regions: {len(audit['redacted_regions'])}")
     print(f"Tags de-identified: {len(audit['deidentified_tags'])}")
     print(f"Pipeline execution time: {audit['execution_time_seconds']:.2f} seconds")
-    print(f"Final anonymized DICOM saved -> {audit['output_path']}")
+    if audit.get("error"):
+        print(f"FAILED, no anonymized DICOM written: {audit['error']}", file=sys.stderr)
+    else:
+        print(f"Final anonymized DICOM saved -> {audit['output_path']}")
     if audit.get("bbox_image_path"):
         print(f"Bounding-box visualization saved -> {audit['bbox_image_path']}")
     print(f"Full pipeline audit saved -> {p['audit']}")
@@ -233,8 +246,8 @@ def main():
             glob.glob(os.path.join(INPUT_DIR, "**", "*.dcm"), recursive=True)
         )
     if not input_files:
-        print(f"No .dcm files found in {INPUT_DIR}/")
-        return
+        print(f"ERROR: no .dcm files found in {INPUT_DIR}/", file=sys.stderr)
+        return 1
 
     print(f"Found {len(input_files)} file(s) to process.")
 
@@ -297,6 +310,19 @@ def main():
         )
     print(f"{'='*75}\n")
 
+    # A batch with any failed file exits non-zero, with each file's real
+    # error, so the job that ran the container reports the cause rather than
+    # finding no output.
+    failed = [a for a in results if a.get("error")]
+    if failed:
+        print(
+            f"ERROR: {len(failed)} of {len(results)} file(s) failed:", file=sys.stderr
+        )
+        for audit in failed:
+            print(f"  {audit['file']}: {audit['error']}", file=sys.stderr)
+        return 1
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

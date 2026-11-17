@@ -91,7 +91,13 @@ docker run --rm \
   ghcr.io/datakaveri/skald-dicom:1.0.0
 ```
 
-The container processes every `.dcm` file in `/app/data` and writes anonymized outputs and logs to `/app/output`. Key material (`secured.json`: hash keys and the reverse token vault) goes to `/app/keys`, a separate volume: **never ship `keys/` with a release**, and reuse the same `keys/` across batches so pseudonyms stay consistent. Model weights are embedded at build time and the runtime refuses network model downloads, so the image runs fully offline.
+The container processes every `.dcm` file in `/app/data` and writes anonymized outputs and logs to `/app/output`. Key material (`secured.json`: hash keys and the reverse token vault) goes to `/app/keys`: **never ship `keys/` with a release**, and mount and reuse the same `keys/` across batches so pseudonyms stay consistent. Without a mount, the keys live and die with the container. Model weights are embedded at build time and the runtime refuses network model downloads, so the image runs fully offline.
+
+If the input files and output directory belong to root and cannot be re-owned (the SPIDEr enclaves stage inputs as root, mode `0600`), run the container as root instead: `--user 0:0`, or `user: "0:0"` in compose.
+
+**Compressed input.** JPEG Lossless (the usual PACS export), JPEG baseline/extended, JPEG-LS, JPEG 2000 and RLE are decoded on read with pylibjpeg. The redacted output is always uncompressed Explicit VR Little Endian (`1.2.840.10008.1.2.1`), so a compressed input grows by about 1.5×: an 8-bit 4248 × 3480 PACS X-ray went from 9.0 MB (JPEG Lossless) to 14.8 MB. Colour images (`SamplesPerPixel` > 1) are rejected; the redaction stages handle single-channel images only.
+
+**Exit status.** `0` when every file was de-identified. `1` when any file failed (its error is printed, and nothing is left at its `after_deidentification.dcm`) or when `/app/data` has no `.dcm` files. Files that succeeded in a failed batch are still written.
 
 ---
 

@@ -1,11 +1,53 @@
 """
-dicom_io.py — Stage 7: write anonymized pixels back into the DICOM dataset
-with correct pixel-descriptor tag updates. (Updated for OCR pipeline integration)
+dicom_io.py — reading compressed pixel data, and Stage 7: writing anonymized
+pixels back into the DICOM dataset with matching pixel-descriptor tags.
 """
 
 import numpy as np
 
 from pydicom.uid import ExplicitVRLittleEndian
+
+
+def decompress_pixels(ds):
+    """Decode compressed Pixel Data in place, before any pixel is touched.
+
+    Returns the original transfer syntax UID if it was compressed (JPEG
+    Lossless, JPEG baseline, JPEG-LS, JPEG 2000, RLE), else None. Afterwards
+    the dataset is Explicit VR Little Endian and PixelData holds the raw
+    pixels, so it can be redacted and saved as-is.
+
+    Without this, the redacted pixels would be written as raw bytes into a
+    file whose header still says JPEG: a corrupt file.
+
+    Raises RuntimeError naming the transfer syntax when no installed decoder
+    (pylibjpeg, pylibjpeg-libjpeg/-openjpeg/-rle) can decode it.
+    """
+    meta = getattr(ds, "file_meta", None)
+    ts = getattr(meta, "TransferSyntaxUID", None) if meta is not None else None
+    if "PixelData" not in ds or ts is None or not ts.is_compressed:
+        return None
+    try:
+        ds.decompress()
+        arr = ds.pixel_array
+    except Exception as e:
+        raise RuntimeError(
+            f"cannot decode pixel data in transfer syntax {ts} ({ts.name}): {e}"
+        ) from e
+    # pydicom 2.x decompress() switches the transfer syntax but leaves the
+    # encapsulated JPEG bytes in PixelData. Replace them now, so the dataset
+    # is consistent even on paths that never write pixels back.
+    _set_pixel_data(ds, arr)
+    return ts
+
+
+def _set_pixel_data(ds, arr):
+    ds.file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
+    ds.is_implicit_VR = False
+    ds.is_little_endian = True
+    ds.PixelData = arr.tobytes()
+    elem = ds["PixelData"]
+    elem.is_undefined_length = False  # was encapsulated if the source was compressed
+    elem.VR = "OB" if ds.BitsAllocated <= 8 else "OW"
 
 
 def write_pixels_to_dicom(ds, cleaned_array):
@@ -53,12 +95,8 @@ def write_pixels_to_dicom(ds, cleaned_array):
     ds.HighBit = high_bit
     ds.PixelRepresentation = pix_rep
 
-    # Ensure uncompressed transfer syntax (Explicit VR Little Endian)
-    ds.file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
-    ds.is_implicit_VR = False
-    ds.is_little_endian = True
-
-    # Write pixel data
-    ds.PixelData = arr.tobytes()
+    # Uncompressed (Explicit VR Little Endian), never encapsulated: the
+    # transfer syntax and the PixelData bytes must always agree.
+    _set_pixel_data(ds, arr)
 
     return ds

@@ -10,7 +10,9 @@ Run from the `updated_code` directory with:
     python -m de_identification.run
 """
 
+import sys
+
 from main import main
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

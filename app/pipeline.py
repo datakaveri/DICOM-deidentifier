@@ -29,7 +29,7 @@ from classify import merge_detections, classify_phi, expand_phi_blocks, _iou
 from phi_tags import load_original_tag_values, match_against_stored_tags
 from masking import redact_pixels
 from verify import verify_redaction
-from dicom_io import write_pixels_to_dicom
+from dicom_io import decompress_pixels, write_pixels_to_dicom
 from de_identification.deidentify import deidentify_dataset
 from bbox_visualize import save_bbox_image
 
@@ -126,14 +126,42 @@ def redact_file_pixels(
         cols = getattr(ds, "Columns", "?")
         audit["image_size"] = f"{rows}x{cols}"
 
+        # ── Decode compressed pixel data, before any pixel is touched ────────
+        # JPEG Lossless (PACS X-rays), JPEG baseline, JPEG-LS, JPEG 2000 and
+        # RLE are decoded here and the file becomes uncompressed. Writing
+        # redacted pixels into a file still marked as JPEG would corrupt it.
+        source_ts = decompress_pixels(ds)
+        if source_ts is not None:
+            audit["source_transfer_syntax"] = str(source_ts)
+            log.info(f"  Decoded {source_ts.name}; output will be uncompressed.")
+
         # ── Extract pixels ────────────────────────────────────────────────────
-        if not hasattr(ds, "pixel_array"):
+        if "PixelData" not in ds:
+            # Rows/Columns say an image was meant to be here. pydicom drops a
+            # Pixel Data element cut off mid-file (force=True), so this is a
+            # truncated or corrupt file, not a pixel-less object (SR, KO, PR).
+            if "Rows" in ds or "Columns" in ds:
+                raise ValueError(
+                    "image attributes present but no readable pixel data "
+                    "(truncated or corrupt file)"
+                )
             log.warning(f"  No pixel data in {filename}. Saving metadata-only.")
             os.makedirs(os.path.dirname(before_output_path), exist_ok=True)
             ds.save_as(before_output_path, write_like_original=False)
             audit["verification_status"] = "SKIPPED (no pixels)"
             audit["pixel_stage_complete"] = True
             return audit
+
+        # Every stage below treats a 3-D array as (frames, rows, cols). A
+        # colour image is (rows, cols, samples) and would be processed as
+        # hundreds of one-row "frames": refuse it rather than write a file
+        # whose burned-in text was never really looked at.
+        samples = int(ds.get("SamplesPerPixel", 1))
+        if samples != 1:
+            raise ValueError(
+                f"colour images are not supported (SamplesPerPixel={samples}, "
+                f"PhotometricInterpretation={ds.get('PhotometricInterpretation')})"
+            )
 
         pixels = ds.pixel_array.copy()
         original_dtype = pixels.dtype
@@ -312,6 +340,7 @@ def deidentify_file_tags(audit, keystore):
 
         # ── Save as DICOM ONLY ────────────────────────────────────────────────
         ds.save_as(output_path, write_like_original=False)
+        audit["output_transfer_syntax"] = str(ds.file_meta.TransferSyntaxUID)
 
         # Confirm output is .dcm
         assert output_path.lower().endswith(".dcm"), "BUG: output path must be .dcm!"
