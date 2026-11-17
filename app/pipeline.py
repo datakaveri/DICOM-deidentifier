@@ -2,6 +2,19 @@
 pipeline.py — full 7-stage anonymization pipeline for a single DICOM file.
 Wires together metadata sanitization, OCR-based PHI detection/classification,
 tag cross-checking, pixel redaction, verification, and DICOM write-back.
+
+It runs as two stages so a batch can be parallelised safely:
+
+  redact_file_pixels   OCR, classification, redaction and verification (all
+                       the model work). Independent per file, so it runs in
+                       worker processes. Writes before_deidentification.dcm.
+  deidentify_file_tags Tag de-identification against the shared KeyStore. It
+                       mints sequential tokens and per-column keys, so it runs
+                       in the parent process, one file at a time, in input
+                       order. The KeyStore then ends up exactly as a serial
+                       run would leave it.
+
+anonymize_dicom_file runs both stages back to back.
 """
 
 import os
@@ -11,7 +24,6 @@ import numpy as np
 import pydicom
 
 from config import log, ENABLE_TAG_DEIDENTIFICATION, BBOX_IMAGE_NAME
-from text_region_detect import detect_text_regions
 from ocr_detect import detect_text_in_regions
 from classify import merge_detections, classify_phi, expand_phi_blocks, _iou
 from phi_tags import load_original_tag_values, match_against_stored_tags
@@ -48,6 +60,40 @@ def anonymize_dicom_file(
 
     Returns an audit dict.
     """
+    audit = redact_file_pixels(
+        input_path,
+        before_output_path,
+        output_path,
+        data_snapshot_path,
+        paddle_ocr,
+        analyzer,
+        deid_model=deid_model,
+        medical_ner=medical_ner,
+        gliner_model=gliner_model,
+    )
+    return deidentify_file_tags(audit, keystore)
+
+
+def redact_file_pixels(
+    input_path,
+    before_output_path,
+    output_path,
+    data_snapshot_path,
+    paddle_ocr,
+    analyzer,
+    deid_model=None,
+    medical_ner=None,
+    gliner_model=None,
+    ds=None,
+):
+    """
+    Pixel stage (Stages 1-7 up to the checkpoint): OCR, PHI classification,
+    redaction, verification, then before_output_path with the redacted pixels
+    and the original tags. Touches no shared state, so it is safe to run in a
+    worker process. Pass `ds` to reuse an already-read dataset.
+
+    Returns an audit dict for deidentify_file_tags.
+    """
     filename = os.path.basename(input_path)
     log.info(f"\n{'='*60}")
     log.info(f"Processing: {filename}")
@@ -65,11 +111,15 @@ def anonymize_dicom_file(
         "deidentified_tags": [],
         "verification_status": "NOT RUN",
         "error": None,
+        # Set once before_output_path is written; tells deidentify_file_tags
+        # there is something to de-identify.
+        "pixel_stage_complete": False,
     }
 
     try:
         # ── Read DICOM ────────────────────────────────────────────────────────
-        ds = pydicom.dcmread(input_path, force=True)
+        if ds is None:
+            ds = pydicom.dcmread(input_path, force=True)
 
         audit["modality"] = getattr(ds, "Modality", "Unknown")
         rows = getattr(ds, "Rows", "?")
@@ -81,9 +131,8 @@ def anonymize_dicom_file(
             log.warning(f"  No pixel data in {filename}. Saving metadata-only.")
             os.makedirs(os.path.dirname(before_output_path), exist_ok=True)
             ds.save_as(before_output_path, write_like_original=False)
-            audit["deidentified_tags"] = deidentify_dataset(ds, keystore)
-            ds.save_as(output_path, write_like_original=False)
             audit["verification_status"] = "SKIPPED (no pixels)"
+            audit["pixel_stage_complete"] = True
             return audit
 
         pixels = ds.pixel_array.copy()
@@ -122,14 +171,13 @@ def anonymize_dicom_file(
             ocr_frame = norm_8
             ocr_pixels = pixels
 
-        # ── Stage 2: Text region detection (shape-based, no OCR) ──────────────
-        log.info("  [Stage 2] Detecting candidate text regions...")
-        text_regions = detect_text_regions(ocr_frame)
-        log.info(f"            Candidate regions: {len(text_regions)}")
-
         # ── Stage 3: OCR ──────────────────────────────────────────────────────
-        log.info("  [Stage 3] Running OCR text detection on candidate regions...")
-        raw_det = detect_text_in_regions(ocr_frame, text_regions, paddle_ocr=paddle_ocr)
+        # Full-image OCR. The shape-based candidate regions (Stage 2,
+        # text_region_detect.py) are only consumed in run_on_regions mode,
+        # so computing them here was wasted work. Full-image OCR is kept on
+        # purpose: region-only OCR misses text the shape detector misses.
+        log.info("  [Stage 3] Running OCR text detection on the full frame...")
+        raw_det = detect_text_in_regions(ocr_frame, [], paddle_ocr=paddle_ocr)
         log.info(f"            Raw detections: {len(raw_det)}")
 
         # ── Stage 4: Classify ─────────────────────────────────────────────────
@@ -206,23 +254,8 @@ def anonymize_dicom_file(
         log.info(
             f"  [Checkpoint] Pixel-redacted DICOM saved (tags still original): {before_output_path}"
         )
-
-        # ── Last: tag de-identification (hash PatientID, mask dates, etc.) ────
-        if ENABLE_TAG_DEIDENTIFICATION:
-            audit["deidentified_tags"] = deidentify_dataset(ds, keystore)
-        else:
-            log.info(
-                "  Tag de-identification skipped (DICOM header tags preserved 100% untouched)."
-            )
-            audit["deidentified_tags"] = []
-
-        # ── Save as DICOM ONLY ────────────────────────────────────────────────
-        ds.save_as(output_path, write_like_original=False)
-
-        # Confirm output is .dcm
-        assert output_path.lower().endswith(".dcm"), "BUG: output path must be .dcm!"
-        log.info(f"  [DONE] Anonymized DICOM saved: {output_path}")
-        log.info(f"         Status: {status}")
+        audit["pixel_stage_complete"] = True
+        log.info(f"         Pixel status: {status}")
 
         # Also save normalized 8-bit preview PNG for quick inspection
         try:
@@ -241,12 +274,50 @@ def anonymize_dicom_file(
             import cv2
 
             preview_p = os.path.join(os.path.dirname(output_path), "after_preview.png")
-            cv2.imwrite(preview_p, preview_8)
+            cv2.imwrite(preview_p, preview_8, [cv2.IMWRITE_PNG_COMPRESSION, 1])
         except Exception as pe:
             log.warning(f"  Could not save after_preview.png: {pe}")
 
     except Exception as e:
         log.error(f"  [ERROR] {filename}: {e}", exc_info=True)
+        audit["error"] = str(e)
+        audit["verification_status"] = "ERROR"
+
+    return audit
+
+
+def deidentify_file_tags(audit, keystore):
+    """
+    Tag stage: reads the pixel-redacted checkpoint, de-identifies its tags
+    (hash PatientID, mask dates, etc.) with the shared `keystore`, and saves
+    audit["output_path"]. Must run in the process that owns the KeyStore, one
+    file at a time, in input order. Returns the same audit dict, updated.
+    """
+    if audit.get("error") or not audit.get("pixel_stage_complete"):
+        return audit
+
+    filename = audit["file"]
+    output_path = audit["output_path"]
+    try:
+        ds = pydicom.dcmread(audit["before_output_path"], force=True)
+
+        # ── Last: tag de-identification (hash PatientID, mask dates, etc.) ────
+        if ENABLE_TAG_DEIDENTIFICATION:
+            audit["deidentified_tags"] = deidentify_dataset(ds, keystore)
+        else:
+            log.info(
+                "  Tag de-identification skipped (DICOM header tags preserved 100% untouched)."
+            )
+            audit["deidentified_tags"] = []
+
+        # ── Save as DICOM ONLY ────────────────────────────────────────────────
+        ds.save_as(output_path, write_like_original=False)
+
+        # Confirm output is .dcm
+        assert output_path.lower().endswith(".dcm"), "BUG: output path must be .dcm!"
+        log.info(f"  [DONE] Anonymized DICOM saved: {output_path}")
+    except Exception as e:
+        log.error(f"  [ERROR] {filename} (tag stage): {e}", exc_info=True)
         audit["error"] = str(e)
         audit["verification_status"] = "ERROR"
 

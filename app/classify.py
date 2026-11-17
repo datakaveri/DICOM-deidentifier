@@ -9,6 +9,10 @@ import numpy as np
 
 from config import log, CLINICAL_ALLOWLIST, PII_PATTERNS
 
+# classify_phi decision cache: (text, model identities) -> (is_phi, reasons).
+_DECISION_CACHE = {}
+_DECISION_CACHE_MAX = 50_000
+
 
 def _iou(a, b):
     xA = max(a[0], b[0])
@@ -255,10 +259,13 @@ def expand_phi_blocks(merged, phi_regions, image_shape):
                     sibling_text = merged[i]["text"]
                     if _is_clinical(sibling_text):
                         log.info(
-                            f"    KEEP-SIBLING (block_expand_override): '{sibling_text}' @ {list(b)}"
+                            "    KEEP-SIBLING (block_expand_override): "
+                            f"{len(sibling_text)} chars @ {list(b)}"
                         )
                         continue
-                    log.info(f"    REDACT (block_expand): '{sibling_text}' @ {list(b)}")
+                    log.info(
+                        f"    REDACT (block_expand): {len(sibling_text)} chars @ {list(b)}"
+                    )
                     phi_regions.append({"text": sibling_text, "bbox": list(b)})
                     phi_bboxes.add(b)
                     added += 1
@@ -483,32 +490,7 @@ def classify_phi(
             return False
         return True
 
-    for det in merged:
-        text = det["text"]
-        bbox = det["bbox"]
-
-        box_w = bbox[2] - bbox[0]
-        box_h = bbox[3] - bbox[1]
-        box_area = box_w * box_h
-        img_area = w * h
-
-        if box_h > h * 0.40 or box_w > w * 0.95 or box_area > (img_area * 0.30):
-            continue
-
-        clean_text = text.strip()
-        if not clean_text:
-            continue
-
-        val_upper = clean_text.upper()
-        reason = []
-
-        # ── 1. PARALLEL SIGNAL GATHERING (Run All Models Simultaneously) ──────
-
-        # Signal A: Clinical Allowlist & Shorthand (e.g. L26, R12, CHEST, AP)
-        is_clinical_allowlist = _is_clinical(clean_text) or _is_text_pure_clinical(
-            clean_text
-        )
-
+    def _signal_deid(clean_text):
         # Signal B: Stanford De-ID Model (Radiology-Native PHI)
         deid_phi_labels = []
         if deid_model:
@@ -538,7 +520,10 @@ def classify_phi(
                         deid_phi_labels.append(clean_group)
             except Exception as e:
                 log.debug(f"Stanford De-ID model error: {e}")
+        return deid_phi_labels
 
+    def _signal_regex(clean_text):
+        val_upper = clean_text.upper()
         # Signal C: Regex PII Patterns & Demographic Labels
         regex_reasons = []
         generic_demographic_labels = [
@@ -581,7 +566,9 @@ def classify_phi(
             if re.search(pat_regex, clean_text, re.IGNORECASE):
                 regex_reasons.append(f"regex:pii_pattern_{pat_name}")
                 break
+        return regex_reasons, has_demographic_label
 
+    def _signal_presidio(clean_text):
         # Signal D: Presidio NLP Analyzer
         presidio_flagged = False
         if analyzer:
@@ -602,7 +589,9 @@ def classify_phi(
                     presidio_flagged = True
             except Exception:
                 pass
+        return presidio_flagged
 
+    def _signal_medical_ner(clean_text):
         # Signal E: Supervised Biomedical NER (d4data/biomedical-ner-all)
         med_ner_labels = []
         if medical_ner:
@@ -623,7 +612,9 @@ def classify_phi(
                         med_ner_labels.append(ent_group)
             except Exception as e:
                 log.debug(f"Medical NER prediction failed: {e}")
+        return med_ner_labels
 
+    def _signal_gliner(clean_text):
         # Signal F: GLiNER-BioMed Zero-Shot Model
         gliner_labels = []
         if gliner_model:
@@ -673,70 +664,120 @@ def classify_phi(
                         gliner_labels.append(ent["label"])
             except Exception as e:
                 log.debug(f"GLiNER-BioMed clinical check failed: {e}")
+        return gliner_labels
 
-        # ── 2. SIMULTANEOUS MATRIX RESOLUTION ─────────────────────────────────
+    def _decide(clean_text):
+        """
+        Same decision as the original "gather every signal, then resolve the
+        matrix" code, but each model runs only if its answer can still change
+        the outcome. The matrix it reproduces:
 
-        phi_signal = bool(deid_phi_labels or regex_reasons or presidio_flagged)
-        medical_signal = bool(med_ner_labels or gliner_labels)
+          1. clinical allowlist                        -> KEEP
+          2. PHI signal and medical signal: PHI if a demographic label,
+             Stanford De-ID or Presidio fired, else    -> KEEP
+          3. PHI signal only                           -> REDACT
+          4. medical signal only                       -> KEEP
+          5. exposure-number pattern                   -> KEEP
+          6. letters                                   -> REDACT, else KEEP
 
-        # Condition 1: Clinical Allowlist / Shorthand (Always KEPT)
-        if is_clinical_allowlist:
-            is_phi = False
-            reason.append("clinical:allowlist")
+        PHI signal = demographic label, PII regex, Stanford De-ID or
+        Presidio. Medical signal = biomedical NER or GLiNER. A demographic
+        label, Stanford or Presidio hit is REDACT under both 2 and 3, so the
+        medical models (GLiNER is ~80% of the runtime) only run when the
+        remaining PHI signal is the PII regex alone, or when there is no PHI
+        signal and the text is neither numeric-only nor an exposure number.
+        """
+        if _is_clinical(clean_text) or _is_text_pure_clinical(clean_text):
+            return False, ("clinical:allowlist",)
 
-        # Condition 2: Simultaneous PHI & Medical Signals present
-        elif phi_signal and medical_signal:
-            # Check if string carries explicit demographic / PII tokens
-            if has_demographic_label or deid_phi_labels or presidio_flagged:
-                is_phi = True
-                reason.append(
-                    f"simultaneous_matrix:phi_overrides_medical(phi={','.join(deid_phi_labels + regex_reasons)}, med={','.join(med_ner_labels + gliner_labels)})"
-                )
-            else:
-                is_phi = False
-                reason.append(
-                    f"simultaneous_matrix:medical_preserved({','.join(med_ner_labels + gliner_labels)})"
-                )
-
-        # Condition 3: Pure PHI Signal (No Medical Signal)
-        elif phi_signal:
-            is_phi = True
-            reasons_combined = (
-                deid_phi_labels
-                + regex_reasons
-                + (["presidio"] if presidio_flagged else [])
-            )
-            reason.append(
-                f"simultaneous_matrix:phi_detected({','.join(reasons_combined)})"
+        regex_reasons, has_demographic_label = _signal_regex(clean_text)
+        if has_demographic_label:
+            return True, (
+                f"simultaneous_matrix:phi_detected({','.join(regex_reasons)})",
             )
 
-        # Condition 4: Pure Medical Signal (No PHI Signal)
-        elif medical_signal:
-            is_phi = False
-            reason.append(
-                f"simultaneous_matrix:medical_entity_preserved({','.join(med_ner_labels + gliner_labels)})"
-            )
+        presidio_flagged = _signal_presidio(clean_text)
+        deid_phi_labels = [] if presidio_flagged else _signal_deid(clean_text)
+        if presidio_flagged or deid_phi_labels:
+            found = (["stanford_deid"] if deid_phi_labels else []) + regex_reasons
+            found += ["presidio"] if presidio_flagged else []
+            return True, (f"simultaneous_matrix:phi_detected({','.join(found)})",)
 
-        # Condition 5: Exposure Number Guard
-        elif re.match(r"^\d{1,4}(?:\.\d+)?(?:\s*-\s*\d{1,4}(?:\.\d+)?)?$", clean_text):
-            is_phi = False
-            reason.append("clinical:exposure_number")
+        if not regex_reasons:
+            # No PHI signal: conditions 5 and 6 keep these whatever the
+            # medical models say, so skip them.
+            if re.match(
+                r"^\d{1,4}(?:\.\d+)?(?:\s*-\s*\d{1,4}(?:\.\d+)?)?$", clean_text
+            ):
+                return False, ("clinical:exposure_number",)
+            if not re.search(r"[A-Za-z]", clean_text):
+                return False, ("fallback:numeric_non_phi",)
 
-        # Condition 6: Default Fallback
+        # The reason names the model that fired, not its output: log lines
+        # must not carry anything a model extracted from the image.
+        if _signal_medical_ner(clean_text):
+            source = "biomedical_ner"
+        elif _signal_gliner(clean_text):
+            source = "gliner"
         else:
-            if re.search(r"[A-Za-z]", clean_text):
-                is_phi = True
-                reason.append("fallback:unclassified_text")
-            else:
-                is_phi = False
-                reason.append("fallback:numeric_non_phi")
+            source = None
+        if source:
+            label = (
+                "simultaneous_matrix:medical_preserved"
+                if regex_reasons
+                else "simultaneous_matrix:medical_entity_preserved"
+            )
+            return False, (f"{label}({source})",)
+        if regex_reasons:
+            return True, (
+                f"simultaneous_matrix:phi_detected({','.join(regex_reasons)})",
+            )
+        return True, ("fallback:unclassified_text",)
 
+    for det in merged:
+        text = det["text"]
+        bbox = det["bbox"]
+
+        box_w = bbox[2] - bbox[0]
+        box_h = bbox[3] - bbox[1]
+        box_area = box_w * box_h
+        img_area = w * h
+
+        if box_h > h * 0.40 or box_w > w * 0.95 or box_area > (img_area * 0.30):
+            continue
+
+        clean_text = text.strip()
+        if not clean_text:
+            continue
+
+        # Decisions depend only on the text and on which models are loaded
+        # (verify.py classifies with Presidio alone), so they are cached per
+        # process: annotations such as site names and markers repeat across a
+        # batch. The cache lives in memory only and is never written out.
+        key = (
+            clean_text,
+            id(analyzer),
+            id(deid_model),
+            id(medical_ner),
+            id(gliner_model),
+        )
+        decision = _DECISION_CACHE.get(key)
+        if decision is None:
+            decision = _decide(clean_text)
+            if len(_DECISION_CACHE) >= _DECISION_CACHE_MAX:
+                _DECISION_CACHE.clear()
+            _DECISION_CACHE[key] = decision
+        is_phi, reasons = decision
+        reason = list(reasons)
+
+        # The OCR'd text is never logged: for REDACT decisions it is the PHI.
         if is_phi:
-            log.info(f"    REDACT ({', '.join(reason)}): '{text}' @ {bbox}")
+            log.info(f"    REDACT ({', '.join(reason)}): {len(text)} chars @ {bbox}")
             phi_regions.append({"text": text, "bbox": bbox})
         else:
             log.info(
-                f"    KEEP ({', '.join(reason) if reason else 'unclassified'}): '{text}' @ {bbox}"
+                f"    KEEP ({', '.join(reason) if reason else 'unclassified'}): "
+                f"{len(text)} chars @ {bbox}"
             )
 
     return phi_regions

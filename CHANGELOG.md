@@ -8,6 +8,40 @@ See [`docs/releasing.md`](docs/releasing.md).
 
 ## [Unreleased]
 
+### Changed
+
+- **About 11× faster end to end with identical output.** On the 6-file
+  sample set, a batch went from 236 s to 20 s, and per-file processing from
+  ~31 s to ~1.4 s. Pixels, redacted regions, verification status, tags and
+  the key store were all compared against the previous version and match.
+  See `docs/performance.md`.
+- `classify_phi` runs each model only when its answer can change the
+  decision. Before, every OCR string ran through all four NER models;
+  GLiNER alone was ~80% of the runtime.
+- `classify_phi` caches decisions per text within a run (in memory only).
+- In a single-process run, GLiNER loads only if a string needs it. Peak
+  memory drops from ~4.2 GB to ~1.2 GB.
+- The unused shape-based Stage 2 pass is no longer computed. Full-image
+  OCR never read its regions.
+- PNG previews are encoded with fast compression; the pixels are the same.
+
+### Added
+
+- `app/runtime.py` sizes the run to the machine it lands on: CPU affinity,
+  cgroup v1/v2 CPU and memory limits, and available memory. This makes the
+  image safe on TEE VMs of unknown shape.
+- Thread caps for torch, Paddle (`cpu_threads`, previously 10 per process),
+  OpenCV, OpenBLAS and MKL.
+- On large machines, the pixel stage runs in worker processes forked after
+  the models load, so the workers share the weights. Tag de-identification
+  stays in one process, in input order, so tokens and keys are minted
+  exactly as in a serial run.
+- The batch finishes serially if the worker pool cannot start, a worker is
+  OOM-killed, or a file exceeds `SKALD_FILE_TIMEOUT_S`.
+- New environment variables: `SKALD_WORKERS`, `SKALD_THREADS_PER_WORKER`,
+  `SKALD_FILE_TIMEOUT_S`, `SKALD_MODEL_MEMORY_MB` and
+  `SKALD_WORKER_MEMORY_MB`.
+
 ## [1.0.0] — unreleased
 
 First tagged release. It replaces the original Flask tag-only service
