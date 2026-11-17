@@ -8,8 +8,39 @@ See [`docs/releasing.md`](docs/releasing.md).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Compressed DICOMs (JPEG Lossless and others) are now de-identified
+  instead of silently failing.** Pixel data is decoded right after reading,
+  and the output is written uncompressed (Explicit VR Little Endian,
+  `1.2.840.10008.1.2.1`). This applies to the PACS X-ray exports, which are
+  JPEG Lossless SV1. Before, decoding failed, 0 tags were de-identified,
+  "Final anonymized DICOM saved" was printed with nothing saved, and the
+  container exited 0. Decoding is lossless: a JPEG Lossless input gives
+  exactly the same output pixels as the same image uncompressed.
+- pydicom 2.x `decompress()` leaves the JPEG bytes in Pixel Data. The
+  dataset's Pixel Data, transfer syntax, VR and length encoding are now
+  always rewritten together, so no output can say "uncompressed" while
+  holding JPEG bytes, or the reverse.
+- **Failures are loud.** A failed file prints its real error and leaves
+  nothing at `after_deidentification.dcm`. The container exits 1 if any file
+  failed, or if `/app/data` has no `.dcm` files.
+- A file with image attributes but no readable Pixel Data (truncated or
+  corrupt) is an error. Before, it was saved as a metadata-only output.
+- `python -m de_identification.run` returns the same exit status as
+  `main.py`.
+
 ### Changed
 
+- Colour images (`SamplesPerPixel` > 1) are rejected with an error. The
+  redaction stages read a 3-D array as frames, so a colour image was
+  processed as hundreds of one-row frames and its burned-in text never
+  really checked.
+- `/app/keys` is no longer a `VOLUME`. Run through `docker compose` without
+  a keys mount, as the enclaves do, every run left an anonymous volume
+  holding `secured.json` behind after `docker compose down`.
+- Output files from compressed inputs are larger: about 1.5× for the 8-bit
+  PACS X-rays (9.0 MB in, 14.8 MB out for a 4248 × 3480 image).
 - **About 11× faster end to end with identical output.** On the 6-file
   sample set, a batch went from 236 s to 20 s, and per-file processing from
   ~31 s to ~1.4 s. Pixels, redacted regions, verification status, tags and

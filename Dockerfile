@@ -140,7 +140,12 @@ WORKDIR /app
 # Non-root: a compromised or misconfigured run cannot write outside its volumes.
 USER 65532:65532
 
-VOLUME ["/app/data", "/app/config", "/app/output", "/app/keys"]
+# /app/keys is deliberately not a VOLUME. Declared, every run without a keys
+# mount (the enclave's compose file has none) would leave an anonymous volume
+# holding secured.json on the host after `docker compose down`. Undeclared,
+# unmounted keys live and die with the container; mount a directory there to
+# keep pseudonyms consistent across batches.
+VOLUME ["/app/data", "/app/config", "/app/output"]
 
 # This is a one-shot batch job with no listening port, so there is nothing to
 # probe over the network. The check proves the interpreter and the heavy
