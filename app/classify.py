@@ -699,7 +699,7 @@ def classify_phi(
         presidio_flagged = _signal_presidio(clean_text)
         deid_phi_labels = [] if presidio_flagged else _signal_deid(clean_text)
         if presidio_flagged or deid_phi_labels:
-            found = deid_phi_labels + regex_reasons
+            found = (["stanford_deid"] if deid_phi_labels else []) + regex_reasons
             found += ["presidio"] if presidio_flagged else []
             return True, (f"simultaneous_matrix:phi_detected({','.join(found)})",)
 
@@ -713,14 +713,21 @@ def classify_phi(
             if not re.search(r"[A-Za-z]", clean_text):
                 return False, ("fallback:numeric_non_phi",)
 
-        medical = _signal_medical_ner(clean_text) or _signal_gliner(clean_text)
-        if medical:
+        # The reason names the model that fired, not its output: log lines
+        # must not carry anything a model extracted from the image.
+        if _signal_medical_ner(clean_text):
+            source = "biomedical_ner"
+        elif _signal_gliner(clean_text):
+            source = "gliner"
+        else:
+            source = None
+        if source:
             label = (
                 "simultaneous_matrix:medical_preserved"
                 if regex_reasons
                 else "simultaneous_matrix:medical_entity_preserved"
             )
-            return False, (f"{label}({','.join(medical)})",)
+            return False, (f"{label}({source})",)
         if regex_reasons:
             return True, (
                 f"simultaneous_matrix:phi_detected({','.join(regex_reasons)})",
