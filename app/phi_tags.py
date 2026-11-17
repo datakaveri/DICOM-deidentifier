@@ -178,7 +178,9 @@ def match_against_stored_tags(merged, stored_values, image_shape):
             continue
 
         bbox = det["bbox"]
-        log.info(f"    REDACT-TAG-MATCH: '{text}' matches stored original tag value")
+        log.info(
+            f"    REDACT-TAG-MATCH: {len(text)} chars match a stored original tag value"
+        )
         matches.append({"text": text, "bbox": bbox})
 
     return matches

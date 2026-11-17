@@ -259,10 +259,13 @@ def expand_phi_blocks(merged, phi_regions, image_shape):
                     sibling_text = merged[i]["text"]
                     if _is_clinical(sibling_text):
                         log.info(
-                            f"    KEEP-SIBLING (block_expand_override): '{sibling_text}' @ {list(b)}"
+                            "    KEEP-SIBLING (block_expand_override): "
+                            f"{len(sibling_text)} chars @ {list(b)}"
                         )
                         continue
-                    log.info(f"    REDACT (block_expand): '{sibling_text}' @ {list(b)}")
+                    log.info(
+                        f"    REDACT (block_expand): {len(sibling_text)} chars @ {list(b)}"
+                    )
                     phi_regions.append({"text": sibling_text, "bbox": list(b)})
                     phi_bboxes.add(b)
                     added += 1
@@ -760,12 +763,14 @@ def classify_phi(
         is_phi, reasons = decision
         reason = list(reasons)
 
+        # The OCR'd text is never logged: for REDACT decisions it is the PHI.
         if is_phi:
-            log.info(f"    REDACT ({', '.join(reason)}): '{text}' @ {bbox}")
+            log.info(f"    REDACT ({', '.join(reason)}): {len(text)} chars @ {bbox}")
             phi_regions.append({"text": text, "bbox": bbox})
         else:
             log.info(
-                f"    KEEP ({', '.join(reason) if reason else 'unclassified'}): '{text}' @ {bbox}"
+                f"    KEEP ({', '.join(reason) if reason else 'unclassified'}): "
+                f"{len(text)} chars @ {bbox}"
             )
 
     return phi_regions

@@ -93,10 +93,9 @@ def pixel_stage(input_path):
             f"Identified {len(phi_tags)} PHI-bearing tag(s) (left unmodified). "
             f"Saved -> {p['phi_tags']}\n"
         )
+        # Tag names and categories only: the values are the PHI itself.
         for t in phi_tags:
-            print(
-                f"{t['tag']:>14}  {t['field']:<28} {t['category']:<14} {t['value'][:40]!r}"
-            )
+            print(f"{t['tag']:>14}  {t['field']:<28} {t['category']:<14}")
 
         # ── Step 2 (+ Step 3): burned-in pixel redaction ───────────────────────
         print(f"\nRunning pixel de-identification on {os.path.basename(input_path)}...")
