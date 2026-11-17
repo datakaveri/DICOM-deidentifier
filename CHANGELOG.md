@@ -8,6 +8,40 @@ See [`docs/releasing.md`](docs/releasing.md).
 
 ## [Unreleased]
 
+### Added
+
+- **SPIDEr job config.** This brings over the per-tag de-identification
+  that the deployed `:latest` (v1.1, built from the old
+  `Integrate-Telangana-DICOM-Dataset` branch) already ran. A `config.json`
+  with a `dicom_deidentify` block applies the user's `tag_actions` from the
+  UI. The actions are `suppress`, `hashing_with_salt`, `encrypt`, `masking`,
+  `tokenization` and `charcloak`. Unlisted tags are kept; UIDs are still
+  remapped and private tags removed. Under a config:
+  - burned-in text is filled solid black;
+  - verification re-checks after escalation and can report `FAILED`;
+  - an unparsable file is an error;
+  - the still-identified intermediates and the run's keys go to a scratch
+    directory under `/tmp` that is deleted at the end.
+  An invalid config exits 1 before any file is read. Without a config, the
+  fixed policy runs. Tag results were compared with v1.1 on the same input
+  and config: the same tags, the same techniques, and different values only
+  for per-run salted hashes and UID remaps.
+- `manifest.json` in the output directory, with per-file status and
+  `tags_by_technique`. The enclave attaches it to the job status.
+- `tag_audit.json` per file.
+- Files with the same name in different input folders get separate output
+  directories (`name`, `name_2`) instead of overwriting each other.
+
+### Security
+
+- `pipeline_audit.json` no longer carries the recognised burned-in text,
+  only region boxes.
+- `bbox_regions.png` shows the PHI before redaction, so it is only written
+  with `SKALD_SAVE_BBOX_PREVIEW=1`.
+- Verification no longer logs the residual text it found.
+- The fixed policy now also masks or removes date tags that
+  `tag_mapping.py` does not list (VR DA/DT, or keyword containing "date").
+
 ### Fixed
 
 - **Compressed DICOMs (JPEG Lossless and others) are now de-identified

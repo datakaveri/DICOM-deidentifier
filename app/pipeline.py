@@ -15,6 +15,13 @@ It runs as two stages so a batch can be parallelised safely:
                        run would leave it.
 
 anonymize_dicom_file runs both stages back to back.
+
+`job_config` (de_identification/job_config.py) selects the policy:
+  None       fixed tag policy (tag_mapping.py), Navier-Stokes inpainting,
+             verification escalates and reports PASSED (Escalated).
+  JobConfig  the user's per-tag choices from the SPIDEr UI, a solid black
+             fill, strict verification (can report FAILED), and an
+             unparsable file fails instead of being read with force=True.
 """
 
 import os
@@ -23,14 +30,22 @@ import datetime
 import numpy as np
 import pydicom
 
-from config import log, ENABLE_TAG_DEIDENTIFICATION, BBOX_IMAGE_NAME
+from config import (
+    log,
+    ENABLE_TAG_DEIDENTIFICATION,
+    BBOX_IMAGE_NAME,
+    SAVE_BBOX_PREVIEW,
+)
 from ocr_detect import detect_text_in_regions
 from classify import merge_detections, classify_phi, expand_phi_blocks, _iou
 from phi_tags import load_original_tag_values, match_against_stored_tags
 from masking import redact_pixels
 from verify import verify_redaction
 from dicom_io import decompress_pixels, write_pixels_to_dicom
-from de_identification.deidentify import deidentify_dataset
+from de_identification.deidentify import (
+    deidentify_dataset,
+    deidentify_dataset_from_config,
+)
 from bbox_visualize import save_bbox_image
 
 
@@ -45,6 +60,8 @@ def anonymize_dicom_file(
     deid_model=None,
     medical_ner=None,
     gliner_model=None,
+    job_config=None,
+    secrets=None,
 ):
     """
     Full 7-stage anonymization pipeline for a single DICOM file: burned-in
@@ -70,8 +87,23 @@ def anonymize_dicom_file(
         deid_model=deid_model,
         medical_ner=medical_ner,
         gliner_model=gliner_model,
+        job_config=job_config,
     )
-    return deidentify_file_tags(audit, keystore)
+    return deidentify_file_tags(audit, keystore, job_config, secrets)
+
+
+def read_dicom(input_path, job_config=None):
+    """Reads `input_path`. force=True lets a batch survive a file without the
+    DICM preamble. Under a job config (fail_on_unparsable) it is off: force
+    turns an unparsable file into a near-empty dataset that passes every
+    stage and gets written out un-de-identified."""
+    fail_on_unparsable = job_config.fail_on_unparsable if job_config else False
+    ds = pydicom.dcmread(input_path, force=not fail_on_unparsable)
+    if fail_on_unparsable and "SOPClassUID" not in ds:
+        raise ValueError(
+            "parsed no SOPClassUID: not a readable DICOM; refusing to emit it"
+        )
+    return ds
 
 
 def redact_file_pixels(
@@ -85,12 +117,14 @@ def redact_file_pixels(
     medical_ner=None,
     gliner_model=None,
     ds=None,
+    job_config=None,
 ):
     """
     Pixel stage (Stages 1-7 up to the checkpoint): OCR, PHI classification,
     redaction, verification, then before_output_path with the redacted pixels
     and the original tags. Touches no shared state, so it is safe to run in a
-    worker process. Pass `ds` to reuse an already-read dataset.
+    worker process. Pass `ds` to reuse an already-read dataset (read it with
+    read_dicom so fail_on_unparsable applies).
 
     Returns an audit dict for deidentify_file_tags.
     """
@@ -116,10 +150,13 @@ def redact_file_pixels(
         "pixel_stage_complete": False,
     }
 
+    pixel_method = job_config.pixel["method"] if job_config else "inpaint"
+    strict_verify = job_config is not None
+
     try:
         # ── Read DICOM ────────────────────────────────────────────────────────
         if ds is None:
-            ds = pydicom.dcmread(input_path, force=True)
+            ds = read_dicom(input_path, job_config)
 
         audit["modality"] = getattr(ds, "Modality", "Unknown")
         rows = getattr(ds, "Rows", "?")
@@ -148,7 +185,9 @@ def redact_file_pixels(
             log.warning(f"  No pixel data in {filename}. Saving metadata-only.")
             os.makedirs(os.path.dirname(before_output_path), exist_ok=True)
             ds.save_as(before_output_path, write_like_original=False)
-            audit["verification_status"] = "SKIPPED (no pixels)"
+            audit["verification_status"] = (
+                "SKIPPED" if job_config else "SKIPPED (no pixels)"
+            )
             audit["pixel_stage_complete"] = True
             return audit
 
@@ -232,16 +271,22 @@ def redact_file_pixels(
                 added += 1
         log.info(f"            Additional regions matched to stored tags: {added}")
 
+        # The text is kept in memory for this run only; main.py strips it
+        # before any audit is written to the output volume.
         audit["redacted_regions"] = [
             {"text": r["text"], "bbox": r["bbox"]} for r in phi_regions
         ]
 
-        # ── Bbox visualization: save the frame with PHI regions boxed ─────────
-        bbox_output_path = os.path.join(
-            os.path.dirname(before_output_path), BBOX_IMAGE_NAME
-        )
-        save_bbox_image(ocr_frame, phi_regions, bbox_output_path)
-        audit["bbox_image_path"] = bbox_output_path
+        # ── Bbox visualization (opt-in: SKALD_SAVE_BBOX_PREVIEW=1) ───────────
+        # The frame BEFORE redaction with boxes drawn on it: it shows the
+        # burned-in PHI in the clear, so it goes beside the still-identified
+        # checkpoint, never by default.
+        if SAVE_BBOX_PREVIEW:
+            bbox_output_path = os.path.join(
+                os.path.dirname(before_output_path), BBOX_IMAGE_NAME
+            )
+            save_bbox_image(ocr_frame, phi_regions, bbox_output_path)
+            audit["bbox_image_path"] = bbox_output_path
 
         # ── Stage 5: Redact ───────────────────────────────────────────────────
         log.info("  [Stage 5] Redacting PHI pixels (Navier-Stokes inpainting)...")
@@ -251,17 +296,24 @@ def redact_file_pixels(
             for i in range(pixels.shape[0]):
                 frame_pix = pixels[i]
                 frame_phi = phi_regions  # same regions for all frames
-                cleaned_frame, _ = redact_pixels(frame_pix, frame_phi)
+                cleaned_frame, _ = redact_pixels(
+                    frame_pix, frame_phi, method=pixel_method
+                )
                 cleaned_frames.append(cleaned_frame)
             cleaned_pixels = np.stack(cleaned_frames, axis=0)
         else:
-            cleaned_pixels, _ = redact_pixels(pixels, phi_regions)
+            cleaned_pixels, _ = redact_pixels(pixels, phi_regions, method=pixel_method)
 
         # ── Stage 6: Verify ───────────────────────────────────────────────────
         verify_frame = cleaned_pixels[0] if cleaned_pixels.ndim == 3 else cleaned_pixels
         cleaned_pixels_final = cleaned_pixels.copy()
         verify_clean, status = verify_redaction(
-            verify_frame, phi_regions, paddle_ocr=paddle_ocr, analyzer=analyzer
+            verify_frame,
+            phi_regions,
+            paddle_ocr=paddle_ocr,
+            analyzer=analyzer,
+            method=pixel_method,
+            strict=strict_verify,
         )
         if cleaned_pixels.ndim == 3:
             cleaned_pixels_final[0] = verify_clean
@@ -314,12 +366,27 @@ def redact_file_pixels(
     return audit
 
 
-def deidentify_file_tags(audit, keystore):
+def _deidentify_tags(ds, keystore, secrets, job_config):
+    """Runs the tag pass `job_config` selects on `ds`, in place; returns the
+    audit trail."""
+    if job_config is not None:
+        # The user's per-tag choices from the SPIDEr UI.
+        return deidentify_dataset_from_config(ds, keystore, secrets, job_config)
+    if not ENABLE_TAG_DEIDENTIFICATION:
+        log.info(
+            "  Tag de-identification skipped (DICOM header tags preserved 100% untouched)."
+        )
+        return []
+    return deidentify_dataset(ds, keystore)
+
+
+def deidentify_file_tags(audit, keystore, job_config=None, secrets=None):
     """
     Tag stage: reads the pixel-redacted checkpoint, de-identifies its tags
-    (hash PatientID, mask dates, etc.) with the shared `keystore`, and saves
-    audit["output_path"]. Must run in the process that owns the KeyStore, one
-    file at a time, in input order. Returns the same audit dict, updated.
+    with the shared `keystore` (and, under a job config, the run's `secrets`),
+    and saves audit["output_path"]. Must run in the process that owns the
+    KeyStore, one file at a time, in input order. Returns the same audit dict,
+    updated.
     """
     if audit.get("error") or not audit.get("pixel_stage_complete"):
         return audit
@@ -329,14 +396,8 @@ def deidentify_file_tags(audit, keystore):
     try:
         ds = pydicom.dcmread(audit["before_output_path"], force=True)
 
-        # ── Last: tag de-identification (hash PatientID, mask dates, etc.) ────
-        if ENABLE_TAG_DEIDENTIFICATION:
-            audit["deidentified_tags"] = deidentify_dataset(ds, keystore)
-        else:
-            log.info(
-                "  Tag de-identification skipped (DICOM header tags preserved 100% untouched)."
-            )
-            audit["deidentified_tags"] = []
+        # ── Last: tag de-identification ───────────────────────────────────────
+        audit["deidentified_tags"] = _deidentify_tags(ds, keystore, secrets, job_config)
 
         # ── Save as DICOM ONLY ────────────────────────────────────────────────
         ds.save_as(output_path, write_like_original=False)

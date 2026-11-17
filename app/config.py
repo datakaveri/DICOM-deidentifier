@@ -40,7 +40,59 @@ FINAL_OUTPUT_NAME = "after_deidentification.dcm"
 DATA_SNAPSHOT_NAME = "data.json"
 PHI_TAGS_SNAPSHOT_NAME = "phi_tags.json"
 PIPELINE_AUDIT_SNAPSHOT_NAME = "pipeline_audit.json"
+TAG_AUDIT_SNAPSHOT_NAME = "tag_audit.json"
+MANIFEST_NAME = "manifest.json"
 BBOX_IMAGE_NAME = "bbox_regions.png"
+
+# The bbox preview is the frame BEFORE redaction with the detected PHI regions
+# drawn on top, so it shows the burned-in PHI in the clear. Useful when tuning
+# detection locally; never written unless asked for.
+SAVE_BBOX_PREVIEW = os.getenv("SKALD_SAVE_BBOX_PREVIEW", "0").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+
+# =============================================================================
+# SPIDEr JOB CONFIG (application "skald_dicom")
+# =============================================================================
+# The middleware decrypts the job config and drops it on the config mount.
+# With a `dicom_deidentify` block, the user's per-tag choices drive tag
+# de-identification (de_identification/job_config.py); without one, or with no
+# file, the fixed policy in tag_mapping.py runs.
+JOB_CONFIG_NAME = os.getenv("SKALD_JOB_CONFIG_NAME", "config.json")
+JOB_CONFIG_FILE = os.getenv(
+    "SKALD_JOB_CONFIG", os.path.join(CONFIG_DIR, JOB_CONFIG_NAME)
+)
+
+# Fixed policy. The config comes from a browser, so only its tag_actions vary
+# between runs; every field below is read from here, never from the document,
+# and job_config.py logs and discards any wire value that disagrees.
+
+# Where the still-identified intermediates (data.json, phi_tags.json,
+# before_deidentification.dcm) and the run's keystore go under a job config.
+# Must stay under /tmp: OUTPUT_DIR is the volume that leaves the enclave.
+TEMP_DIR = os.getenv("SKALD_TEMP_DIR", "/tmp/skald-dicom")
+
+# True would publish the OCR-recognised burned-in text (names, MRNs) beside the
+# output. Pinned false: published audits carry region geometry only.
+EMIT_PIXEL_TEXT_REPORT = False
+
+# No UID crosswalk exists. Pinned false so one is never published later.
+EMIT_UID_CROSSWALK = False
+
+# Under a job config, a file pydicom cannot parse fails instead of being read
+# with force=True into a near-empty dataset that passes every stage.
+FAIL_ON_UNPARSABLE = True
+
+# Under a job config, burned-in text is always redacted with a solid black
+# fill (not reversible, leaves no stroke residue) and verification re-checks
+# after escalation, so a file can report FAILED.
+PIXEL_POLICY = {
+    "redact_burned_in_text": True,
+    "method": "black",
+    "verify": True,
+}
 
 # Set to True to enable DICOM header tag de-identification (hashing/masking/FPE).
 # Set to False to keep all DICOM header tags 100% original and untouched (focusing solely on burned-in pixel text redaction).

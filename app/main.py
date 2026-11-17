@@ -18,17 +18,38 @@ Parallelism (see runtime.py for how the machine is sized):
   - The tag stage runs here, one file at a time, in sorted input order,
     while the workers carry on with later files.
 
-One KeyStore is loaded from SECURED_KEYSTORE_FILE ("secured.json") and used
-only by this process, then saved once at the end. So the same
-PatientID/AccessionNumber/etc. hashes or tokenises to the same value in every
-file, and tokens are minted in the same order as a serial run.
+One KeyStore is used only by this process and saved once at the end. So the
+same PatientID/AccessionNumber/etc. hashes or tokenises to the same value in
+every file, and tokens are minted in the same order as a serial run.
+
+Which policy runs is decided by the decrypted SPIDEr job config on the config
+mount (de_identification/job_config.py):
+
+  no file, or no `dicom_deidentify` block
+      The fixed tag policy (tag_mapping.py) and inpainting. Intermediates stay
+      beside the output; the keystore is SECURED_KEYSTORE_FILE and persists.
+  a `dicom_deidentify` block
+      The user's per-tag choices (`tag_actions`; unlisted tags are kept), a
+      black fill and strict verification. The still-identified intermediates
+      (data.json, phi_tags.json, before_deidentification.dcm) and the keystore
+      go to a per-run scratch directory under TEMP_DIR (/tmp), deleted at the
+      end: OUTPUT_DIR is the volume that leaves the enclave. The
+      hashing_with_salt salt is per run, in memory only.
+
+Per input file, OUTPUT_DIR/<name>/ gets after_deidentification.dcm,
+after_preview.png, pipeline_audit.json (region geometry, status, timing; the
+recognised text is stripped) and tag_audit.json (technique per tag, no
+values). OUTPUT_DIR/manifest.json summarises the run; the enclave attaches it
+to the job status and the UI shows its tags_by_technique.
 """
 
 import glob
 import json
 import os
 import re
+import shutil
 import sys
+import tempfile
 import time
 
 import runtime
@@ -40,7 +61,11 @@ from config import (
     DATA_SNAPSHOT_NAME,
     PHI_TAGS_SNAPSHOT_NAME,
     PIPELINE_AUDIT_SNAPSHOT_NAME,
+    TAG_AUDIT_SNAPSHOT_NAME,
+    MANIFEST_NAME,
     SECURED_KEYSTORE_FILE,
+    EMIT_PIXEL_TEXT_REPORT,
+    TEMP_DIR,
     log,
 )
 
@@ -49,38 +74,81 @@ from config import (
 _ENGINES = None
 # Set when the worker pool failed and the batch finished serially.
 _FALLBACK_NOTE = None
+# The parsed job config (None: fixed policy), this run's scratch directory
+# (job config only) and each input's output-directory name. Set before the
+# workers are forked; each worker inherits them.
+_JOB_CONFIG = None
+_SCRATCH_DIR = None
+_OUT_NAMES = {}
+
+
+def _safe_stem(input_path):
+    stem = os.path.splitext(os.path.basename(input_path))[0]
+    return re.sub(r"[^a-zA-Z0-9_\-]", "_", stem)[:64] or "file"
+
+
+def _allocate_out_names(input_files):
+    """One output-directory name per input. The scan can be recursive, so two
+    files may share a basename: the second gets `_2` instead of overwriting
+    the first's output."""
+    names, taken = {}, set()
+    for path in input_files:
+        stem = name = _safe_stem(path)
+        n = 1
+        while name in taken:
+            n += 1
+            name = f"{stem}_{n}"
+        taken.add(name)
+        names[path] = name
+    return names
 
 
 def _paths(input_path):
-    stem = os.path.splitext(os.path.basename(input_path))[0]
-    safe_stem = re.sub(r"[^a-zA-Z0-9_\-]", "_", stem)[:64]
-    out_dir = os.path.join(OUTPUT_DIR, safe_stem)
+    name = _OUT_NAMES.get(input_path) or _safe_stem(input_path)
+    out_dir = os.path.join(OUTPUT_DIR, name)
+    # Files that still hold original values go to the scratch tree under a
+    # job config, never to the output volume.
+    work_dir = os.path.join(_SCRATCH_DIR, name) if _SCRATCH_DIR else out_dir
     return {
         "out_dir": out_dir,
-        "before": os.path.join(out_dir, BEFORE_OUTPUT_NAME),
+        "work_dir": work_dir,
+        "before": os.path.join(work_dir, BEFORE_OUTPUT_NAME),
+        "data": os.path.join(work_dir, DATA_SNAPSHOT_NAME),
+        "phi_tags": os.path.join(work_dir, PHI_TAGS_SNAPSHOT_NAME),
         "final": os.path.join(out_dir, FINAL_OUTPUT_NAME),
-        "data": os.path.join(out_dir, DATA_SNAPSHOT_NAME),
-        "phi_tags": os.path.join(out_dir, PHI_TAGS_SNAPSHOT_NAME),
         "audit": os.path.join(out_dir, PIPELINE_AUDIT_SNAPSHOT_NAME),
+        "tag_audit": os.path.join(out_dir, TAG_AUDIT_SNAPSHOT_NAME),
     }
+
+
+def _publishable_audit(audit):
+    """The audit as written to the output volume: the recognised burned-in
+    text (the PHI the pass just removed from the pixels) is dropped and only
+    the geometry survives, since EMIT_PIXEL_TEXT_REPORT is pinned false."""
+    if EMIT_PIXEL_TEXT_REPORT:
+        return audit
+    published = dict(audit)
+    published["redacted_regions"] = [
+        {"bbox": r.get("bbox")} for r in audit.get("redacted_regions", [])
+    ]
+    return published
 
 
 def pixel_stage(input_path):
     """Step 1 and the pixel pipeline for one file. Safe to run in a worker."""
-    import pydicom
-
     from phi_tags import dump_original_tags, identify_phi_tags
-    from pipeline import redact_file_pixels
+    from pipeline import read_dicom, redact_file_pixels
 
     paddle_ocr, analyzer, deid_model, medical_ner, gliner_model = _ENGINES
     start_time = time.time()
     p = _paths(input_path)
-    os.makedirs(p["out_dir"], exist_ok=True)
 
     print(f"\n{'#'*60}\n# {os.path.basename(input_path)}\n{'#'*60}")
 
     try:
-        ds = pydicom.dcmread(input_path, force=True)
+        os.makedirs(p["out_dir"], exist_ok=True)
+        os.makedirs(p["work_dir"], exist_ok=True)
+        ds = read_dicom(input_path, _JOB_CONFIG)
 
         # Snapshot every original tag value, for reference (no tag is ever modified)
         dump_original_tags(ds, p["data"])
@@ -111,6 +179,7 @@ def pixel_stage(input_path):
             medical_ner=medical_ner,
             gliner_model=gliner_model,
             ds=ds,
+            job_config=_JOB_CONFIG,
         )
     except Exception as e:
         log.error(f"  [ERROR] {os.path.basename(input_path)}: {e}", exc_info=True)
@@ -129,12 +198,12 @@ def pixel_stage(input_path):
     return audit
 
 
-def tag_stage(audit, keystore):
-    """Tag de-identification and the audit file. Runs in the parent only."""
+def tag_stage(audit, keystore, secrets=None):
+    """Tag de-identification and the audit files. Runs in the parent only."""
     from pipeline import deidentify_file_tags
 
     start_time = time.time()
-    audit = deidentify_file_tags(audit, keystore)
+    audit = deidentify_file_tags(audit, keystore, _JOB_CONFIG, secrets)
     audit.pop("pixel_stage_complete", None)
     pixel_seconds = audit.pop("pixel_stage_seconds", 0)
     audit["execution_time_seconds"] = round(pixel_seconds + time.time() - start_time, 2)
@@ -149,8 +218,12 @@ def tag_stage(audit, keystore):
         audit["verification_status"] = "ERROR"
 
     p = _paths(audit["input_path"])
+    os.makedirs(p["out_dir"], exist_ok=True)
     with open(p["audit"], "w") as f:
-        json.dump(audit, f, indent=2)
+        json.dump(_publishable_audit(audit), f, indent=2)
+    # Which technique hit which tag; no values, so no PHI.
+    with open(p["tag_audit"], "w") as f:
+        json.dump(audit.get("deidentified_tags", []), f, indent=2)
 
     print(f"\n[{audit['file']}]")
     print(f"Pixel anonymization status: {audit['verification_status']}")
@@ -178,7 +251,7 @@ def _worker_init(threads):
         pass
 
 
-def _run_parallel(input_files, plan, keystore):
+def _run_parallel(input_files, plan, keystore, secrets=None):
     """Yields finished audits in input order.
 
     Falls back to processing the remaining files serially in this process if
@@ -211,7 +284,7 @@ def _run_parallel(input_files, plan, keystore):
             futures = [pool.submit(pixel_stage, f) for f in input_files]
         for fut in futures:
             audit = fut.result(timeout=timeout)
-            yield tag_stage(audit, keystore)
+            yield tag_stage(audit, keystore, secrets)
             done += 1
         pool.shutdown(wait=True)
         return
@@ -234,11 +307,65 @@ def _run_parallel(input_files, plan, keystore):
 
     runtime.apply_thread_limits(plan.cpus)
     for input_path in input_files[done:]:
-        yield tag_stage(pixel_stage(input_path), keystore)
+        yield tag_stage(pixel_stage(input_path), keystore, secrets)
+
+
+def _summarize(audit):
+    """One manifest entry. tags_by_technique counts only tags really changed,
+    keyed by the technique names the run used: under a job config, the UI's
+    own action names."""
+    by_technique, touched = {}, 0
+    for entry in audit.get("deidentified_tags", []):
+        if (
+            entry.get("changed", True) is False
+            or entry.get("action") == "skipped-empty"
+        ):
+            continue
+        touched += 1
+        by_technique[entry["technique"]] = by_technique.get(entry["technique"], 0) + 1
+    return {
+        "file": audit["file"],
+        "input_path": os.path.relpath(audit["input_path"], INPUT_DIR),
+        "output_dir": _paths(audit["input_path"])["out_dir"],
+        "pixel_verification_status": audit.get("verification_status"),
+        "redacted_regions": len(audit.get("redacted_regions", [])),
+        "tags_touched": touched,
+        "tags_by_technique": by_technique,
+        "execution_time_seconds": audit.get("execution_time_seconds"),
+        "error": audit.get("error"),
+    }
+
+
+def _write_manifest(results, job_config=None):
+    """OUTPUT_DIR/manifest.json. The enclave attaches it (minus file names and
+    paths) to the job status; the UI shows tags_by_technique."""
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    manifest = {"files": [_summarize(a) for a in results]}
+    if job_config is not None:
+        manifest["dataset_name"] = job_config.dataset_name
+        manifest["ingest_mode"] = job_config.ingest_mode
+        if job_config.unresolved_keywords:
+            manifest["unresolved_tag_actions"] = job_config.unresolved_keywords
+    path = os.path.join(OUTPUT_DIR, MANIFEST_NAME)
+    with open(path, "w") as f:
+        json.dump(manifest, f, indent=2)
+    return path
 
 
 def main():
-    global _ENGINES
+    global _ENGINES, _JOB_CONFIG, _SCRATCH_DIR, _OUT_NAMES
+
+    from de_identification.job_config import JobConfigError, load_job_config
+
+    # A config that is present but cannot be understood is fatal: silently
+    # running a different policy than the user chose is the worst outcome.
+    try:
+        _JOB_CONFIG = load_job_config()
+    except JobConfigError as e:
+        print(f"ERROR: invalid job config: {e}", file=sys.stderr)
+        return 1
+    policy = "job config (tag_actions)" if _JOB_CONFIG else "fixed policy"
+    print(f"Tag policy: {policy}")
 
     input_files = sorted(glob.glob(os.path.join(INPUT_DIR, "*.dcm")))
     if not input_files:
@@ -246,10 +373,12 @@ def main():
             glob.glob(os.path.join(INPUT_DIR, "**", "*.dcm"), recursive=True)
         )
     if not input_files:
+        _write_manifest([], _JOB_CONFIG)
         print(f"ERROR: no .dcm files found in {INPUT_DIR}/", file=sys.stderr)
         return 1
 
     print(f"Found {len(input_files)} file(s) to process.")
+    _OUT_NAMES = _allocate_out_names(input_files)
 
     # Size the run before numpy/torch/paddle/cv2 load: they read their thread
     # settings once, at import.
@@ -257,6 +386,7 @@ def main():
     print(f"Execution plan: {plan.describe()}")
 
     from engines import check_gpu_available, initialize_engines
+    from de_identification.actions import RunSecrets
     from de_identification.keystore import KeyStore
 
     # GNU OpenMP (torch's CPU backend) is not fork-safe: if this process
@@ -274,19 +404,39 @@ def main():
 
     # One KeyStore, owned by this process, saved once at the end, so every
     # file's hash/tokenise/encrypt values stay consistent with each other.
-    keystore = KeyStore(SECURED_KEYSTORE_FILE)
-
-    batch_start = time.time()
-    if plan.workers > 1:
-        results = list(_run_parallel(input_files, plan, keystore))
+    # Under a job config it holds only this run's keys and lives in the
+    # scratch directory: a key that leaves the enclave beside the data it
+    # protects is a re-identification key. The hashing_with_salt salt is
+    # minted once per run and never written anywhere.
+    if _JOB_CONFIG is not None:
+        os.makedirs(TEMP_DIR, mode=0o700, exist_ok=True)
+        _SCRATCH_DIR = tempfile.mkdtemp(prefix="run-", dir=TEMP_DIR)
+        keystore_path = os.path.join(_SCRATCH_DIR, "keystore", "secured.json")
+        secrets = RunSecrets()
     else:
-        results = [tag_stage(pixel_stage(f), keystore) for f in input_files]
-    wall = time.time() - batch_start
+        keystore_path = SECURED_KEYSTORE_FILE
+        secrets = None
+    keystore = KeyStore(keystore_path)
 
-    keystore.save()
-    print(
-        f"\nShared key/token material for this batch saved -> {SECURED_KEYSTORE_FILE}"
-    )
+    try:
+        batch_start = time.time()
+        if plan.workers > 1:
+            results = list(_run_parallel(input_files, plan, keystore, secrets))
+        else:
+            results = [
+                tag_stage(pixel_stage(f), keystore, secrets) for f in input_files
+            ]
+        wall = time.time() - batch_start
+
+        keystore.save()
+        print(f"\nShared key/token material for this batch saved -> {keystore_path}")
+        manifest_path = _write_manifest(results, _JOB_CONFIG)
+    finally:
+        # The scratch tree holds original tag values, the un-de-identified
+        # checkpoint and this run's keys; nothing reads it after the batch.
+        if _SCRATCH_DIR:
+            shutil.rmtree(_SCRATCH_DIR, ignore_errors=True)
+            print(f"Scratch (still-identified intermediates) cleared -> {_SCRATCH_DIR}")
 
     total_file_time = sum(a.get("execution_time_seconds", 0) for a in results)
     avg_time = total_file_time / len(results) if results else 0
@@ -308,7 +458,8 @@ def main():
         print(
             f"{audit['file'][:40]:<42} {audit['verification_status']:<16} {num_regions:<8} {t_sec:>6.2f}s"
         )
-    print(f"{'='*75}\n")
+    print(f"{'='*75}")
+    print(f"Manifest -> {manifest_path}\n")
 
     # A batch with any failed file exits non-zero, with each file's real
     # error, so the job that ran the container reports the cause rather than

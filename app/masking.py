@@ -276,14 +276,31 @@ def _cluster_bboxes(regions, margin=8):
     return [{"bbox": b} for b in boxes]
 
 
-def redact_pixels(image_array, phi_regions, ds=None):
+def redact_black(cleaned, x1, y1, x2, y2):
+    """Fills the box with the array's minimum: black in the frame's own
+    representation (a MONOCHROME1 frame is already flipped to MONOCHROME2
+    sense when this runs, and flipped back afterwards).
+
+    Unlike inpainting it reconstructs nothing and leaves no stroke residue.
     """
-    Unified character-stroke level pixel redaction with Navier-Stokes neighbor propagation.
-    Applies structure-preserving reconstruction across ALL regions uniformly.
+    cleaned[y1:y2, x1:x2] = cleaned.min() if cleaned.size else 0
+    return cleaned
+
+
+def redact_pixels(image_array, phi_regions, ds=None, method="inpaint"):
+    """
+    method="inpaint" (default, the fixed-policy path): unified character-stroke
+    level redaction with Navier-Stokes neighbor propagation, applied across
+    clustered regions.
+
+    method="black" (pinned under a SPIDEr job config, config.PIXEL_POLICY):
+    every PHI box is filled solid black.
 
     Works on native 8-bit OR 16-bit pixel arrays without losing dynamic range.
     Returns (cleaned_array, combined_mask).
     """
+    if method not in ("inpaint", "black"):
+        raise ValueError(f"unknown redaction method {method!r}")
     if not phi_regions:
         log.info("  [Stage 5] No PHI pixels to redact.")
         return image_array.copy(), np.zeros(image_array.shape[:2], dtype=np.uint8)
@@ -299,6 +316,16 @@ def redact_pixels(image_array, phi_regions, ds=None):
         x2, y2 = min(w, x2), min(h, y2)
         if (x2 - x1) > 0 and (y2 - y1) > 0:
             combined_mask[y1:y2, x1:x2] = 255
+
+    if method == "black":
+        for region in phi_regions:
+            x1, y1, x2, y2 = region["bbox"]
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(w, x2), min(h, y2)
+            if (x2 - x1) > 0 and (y2 - y1) > 0:
+                cleaned = redact_black(cleaned, x1, y1, x2, y2)
+        log.info(f"  [Stage 5] Black fill applied to {len(phi_regions)} region(s).")
+        return cleaned, combined_mask
 
     # Cluster overlapping/adjacent bboxes into unified blocks
     clusters = _cluster_bboxes(phi_regions, margin=8)

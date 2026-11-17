@@ -61,13 +61,25 @@ pytest -q
 ```
 
 ### Outputs Generated (per DICOM file)
-Under `app/output/<sample_name>/`:
+Under `<output>/<sample_name>/`:
 - `after_deidentification.dcm` — Final anonymized DICOM (pixel-redacted + tag de-identified).
-- `after_preview.png` — Normalized visual inspection preview image.
-- `before_deidentification.dcm` — Intermediate checkpoint (pixel-redacted, original tags).
-- `bbox_regions.png` — Bounding boxes of detected PHI annotations.
-- `pipeline_audit.json` — Detailed audit log (redacted regions, execution time, status).
-- `data.json` & `phi_tags.json` — Pre-deidentification tag snapshots.
+- `after_preview.png` — Preview of the redacted pixels.
+- `pipeline_audit.json` — Redacted region boxes (no recognised text), verification status, timing, errors.
+- `tag_audit.json` — Which technique was applied to which tag (no values).
+- `before_deidentification.dcm`, `data.json`, `phi_tags.json` — Still hold the original values. Without a job config they sit beside the output; with one they go to a scratch directory under `SKALD_TEMP_DIR` that is deleted at the end of the batch.
+- `bbox_regions.png` — Only with `SKALD_SAVE_BBOX_PREVIEW=1`: the frame before redaction with PHI boxes drawn on it, so it shows the PHI.
+
+`<output>/manifest.json` summarises the run per file (status, region count, `tags_by_technique`, error). The SPIDEr enclave attaches it to the job status.
+
+### Job config (SPIDEr UI)
+
+If `config.json` in the config directory has a `dicom_deidentify` block, its `tag_actions` decide what happens to each tag, as the user chose in the UI. The contract is in the UI repo (`docs/dicom-deidentify-config-contract.md`).
+- **Actions:** `suppress` (blank, tag kept), `hashing_with_salt` (per-run salt, never stored), `encrypt`, `masking`, `tokenization` and `charcloak`.
+- **Tags not listed** are kept unchanged. UIDs are still remapped and private tags are still removed.
+- **Fixed policy:** burned-in text is filled black, verification is strict and can report `FAILED`, and an unparsable file is an error. Values sent for the fixed fields (`temp_dir`, `pixel`, `fail_on_unparsable`, ...) are logged and ignored.
+- **Invalid config:** the run exits 1 before reading any file.
+
+With no config file, or no `dicom_deidentify` block, the fixed policy in `app/de_identification/tag_mapping.py` runs. It removes or transforms every PHI tag, including unlisted date tags, and redacts with inpainting.
 
 ---
 
@@ -113,6 +125,9 @@ If the input files and output directory belong to root and cannot be re-owned (t
 | `SKALD_THREADS_PER_WORKER` | auto | Math-library threads per worker (default: CPUs ÷ workers) |
 | `SKALD_FILE_TIMEOUT_S` | `900` | Seconds one file may take before a worker counts as hung; the batch then finishes serially |
 | `SKALD_MODEL_MEMORY_MB` / `SKALD_WORKER_MEMORY_MB` | `4500` / `1500` | Memory estimates used to size the worker pool |
+| `SKALD_JOB_CONFIG` | `$SKALD_CONFIG_DIR/config.json` | The decrypted SPIDEr job config (see "Job config") |
+| `SKALD_TEMP_DIR` | `/tmp/skald-dicom` | Scratch for still-identified intermediates and the run's keys under a job config; must be under `/tmp` |
+| `SKALD_SAVE_BBOX_PREVIEW` | `0` | `1` writes `bbox_regions.png` (shows PHI; local tuning only) |
 
 The image sizes itself to the machine it lands on (CPU affinity, cgroup CPU and memory limits, available memory), so the same image runs on an unknown TEE VM without tuning. See [`docs/performance.md`](docs/performance.md).
 
