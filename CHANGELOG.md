@@ -8,6 +8,26 @@ See [`docs/releasing.md`](docs/releasing.md).
 
 ## [Unreleased]
 
+## [2.0.0] — 2026-11-17
+
+The first release built by this repository's release pipeline. The images
+`v1.0.0` to `v1.3` on GHCR were pushed by hand from other branches, and
+`:latest` pointed at `v1.1`. This release moves `:latest`.
+
+**Before deploying:** the image runs as uid 65532 by default. The SPIDEr
+enclaves stage inputs root-owned (mode `0600`), so their compose file must
+set `user: "0:0"`. datakaveri/Docker-Compose#2 does this.
+
+**Behaviour that changes against v1.1:**
+- Compressed (JPEG) DICOMs are de-identified instead of failing.
+- Output is always uncompressed, which makes it about 1.5× larger for JPEG
+  inputs.
+- Colour images are rejected.
+- Any failed file makes the container exit 1.
+- Burned-in text detection is this repository's pipeline. It can differ
+  from v1.1 on markers: for example, an "L A6" laterality marker that v1.1
+  blacked out is now kept.
+
 ### Added
 
 - **SPIDEr job config.** This brings over the per-tag de-identification
@@ -31,6 +51,20 @@ See [`docs/releasing.md`](docs/releasing.md).
 - `tag_audit.json` per file.
 - Files with the same name in different input folders get separate output
   directories (`name`, `name_2`) instead of overwriting each other.
+- `app/runtime.py` sizes the run to the machine it lands on: CPU affinity,
+  cgroup v1/v2 CPU and memory limits, and available memory. This makes the
+  image safe on TEE VMs of unknown shape.
+- Thread caps for torch, Paddle (`cpu_threads`, previously 10 per process),
+  OpenCV, OpenBLAS and MKL.
+- On large machines, the pixel stage runs in worker processes forked after
+  the models load, so the workers share the weights. Tag de-identification
+  stays in one process, in input order, so tokens and keys are minted
+  exactly as in a serial run.
+- The batch finishes serially if the worker pool cannot start, a worker is
+  OOM-killed, or a file exceeds `SKALD_FILE_TIMEOUT_S`.
+- New environment variables: `SKALD_WORKERS`, `SKALD_THREADS_PER_WORKER`,
+  `SKALD_FILE_TIMEOUT_S`, `SKALD_MODEL_MEMORY_MB` and
+  `SKALD_WORKER_MEMORY_MB`.
 
 ### Security
 
@@ -90,30 +124,13 @@ See [`docs/releasing.md`](docs/releasing.md).
   OCR never read its regions.
 - PNG previews are encoded with fast compression; the pixels are the same.
 
-### Added
-
-- `app/runtime.py` sizes the run to the machine it lands on: CPU affinity,
-  cgroup v1/v2 CPU and memory limits, and available memory. This makes the
-  image safe on TEE VMs of unknown shape.
-- Thread caps for torch, Paddle (`cpu_threads`, previously 10 per process),
-  OpenCV, OpenBLAS and MKL.
-- On large machines, the pixel stage runs in worker processes forked after
-  the models load, so the workers share the weights. Tag de-identification
-  stays in one process, in input order, so tokens and keys are minted
-  exactly as in a serial run.
-- The batch finishes serially if the worker pool cannot start, a worker is
-  OOM-killed, or a file exceeds `SKALD_FILE_TIMEOUT_S`.
-- New environment variables: `SKALD_WORKERS`, `SKALD_THREADS_PER_WORKER`,
-  `SKALD_FILE_TIMEOUT_S`, `SKALD_MODEL_MEMORY_MB` and
-  `SKALD_WORKER_MEMORY_MB`.
-
-## [1.0.0] — unreleased
+### Since the Flask service (drafted as 1.0.0, never released)
 
 First tagged release. It replaces the original Flask tag-only service
 (`server.py`, `deidentifier.py`, `detect_pii.py`) with the batch pipeline in
 `app/`, which also redacts burned-in pixel text.
 
-### Migrating from the Flask service
+#### Migrating from the Flask service
 
 1. **No HTTP API.** The `/inspect_DICOM` and `/process_DICOM` endpoints are
    gone. The image is a one-shot batch job: mount DICOMs at `/app/data`, read
@@ -133,7 +150,7 @@ First tagged release. It replaces the original Flask tag-only service
    `:latest` to the highest release. Deployments run `:latest`; pin a version
    or digest instead when a run must be reproducible.
 
-### Security
+#### Security
 
 - **Dependency advisories closed** (all seven open Dependabot alerts):
   - `Flask-Cors` CVE-2024-6221, CVE-2024-6839, CVE-2024-6844, CVE-2024-6866
@@ -158,7 +175,7 @@ First tagged release. It replaces the original Flask tag-only service
   `sample_data/synthetic_phi.dcm` are no longer in the tree. Both are
   synthetic.
 
-### Added
+#### Added
 
 - Burned-in pixel text redaction: PaddleOCR detection, multi-model PHI
   classification (Presidio, Stanford De-ID, biomedical NER, GLiNER, regex,
@@ -178,7 +195,7 @@ First tagged release. It replaces the original Flask tag-only service
   CODEOWNERS, `LICENSE` (Apache-2.0), `SECURITY.md`, `CONTRIBUTING.md`,
   `.env.example`, pre-commit hooks.
 
-### Changed
+#### Changed
 
 - Dependencies declared once, in `pyproject.toml`, with upper bounds;
   `requirements.txt` is removed in favour of the hashed locks.
