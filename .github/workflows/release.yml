@@ -20,8 +20,11 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.v.outputs.version }}
+      latest: ${{ steps.latest.outputs.latest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # all tags, to decide whether this release is the newest
       - id: v
         name: Tag must equal the package version and have a CHANGELOG entry
         run: |
@@ -44,6 +47,19 @@ jobs:
             exit 1
           fi
           echo "version=${version}" >> "$GITHUB_OUTPUT"
+      # Deployments run :latest, so it must only ever move forward. A patch
+      # to an older line (v1.4.3 after v2.0.0 exists) is published under its
+      # own version tags but does not take :latest.
+      - id: latest
+        name: Is this the highest release tag?
+        run: |
+          highest=$(git tag -l 'v*.*.*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+          if [ "${highest}" = "${GITHUB_REF_NAME}" ]; then
+            echo "latest=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::${GITHUB_REF_NAME} is not the highest release (${highest}); :latest stays put"
+            echo "latest=false" >> "$GITHUB_OUTPUT"
+          fi
 
   image:
     needs: version
@@ -62,7 +78,9 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ github.token }}
       # The image name stays skald-dicom, the name SPIDEr deployments already
-      # pull. No mutable `latest` tag: deployments pin a version (or digest).
+      # pull. Every release gets its immutable X.Y.Z / vX.Y.Z tags; :latest
+      # (what deployments run) moves only when this is the highest release.
+      # An empty line in `tags` is ignored.
       - id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
@@ -72,6 +90,7 @@ jobs:
           tags: |
             ghcr.io/datakaveri/skald-dicom:${{ needs.version.outputs.version }}
             ghcr.io/datakaveri/skald-dicom:v${{ needs.version.outputs.version }}
+            ${{ needs.version.outputs.latest == 'true' && 'ghcr.io/datakaveri/skald-dicom:latest' || '' }}
 
   github-release:
     needs: [version, image]
@@ -102,7 +121,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.version.outputs.version }}
+          LATEST: ${{ needs.version.outputs.latest }}
         run: |
           gh release create "${GITHUB_REF_NAME}" \
             --title "DICOM De-Identifier ${VERSION}" \
-            --notes-file notes.md --verify-tag
+            --notes-file notes.md --verify-tag --latest="${LATEST}"

@@ -41,16 +41,32 @@ removed or kept* as MAJOR: downstream data-sharing approvals are tied to it.
 4. [`release.yml`](../.github/workflows/release.yml) then:
    - fails unless the tag equals `v<pyproject version>`, `app/__init__.py`
      agrees, and `CHANGELOG.md` has a dated section for it;
-   - builds and pushes `ghcr.io/datakaveri/skald-dicom:X.Y.Z` and `:vX.Y.Z`;
+   - builds and pushes `ghcr.io/datakaveri/skald-dicom:X.Y.Z` and `:vX.Y.Z`,
+     plus `:latest` if `vX.Y.Z` is now the highest release tag;
    - creates the GitHub Release with that CHANGELOG section and the image
      digest.
 
 ## Deploying
 
-Deployments pin `ghcr.io/datakaveri/skald-dicom:X.Y.Z`, or better its digest
-from the release notes. There is deliberately no `latest` tag, so an image
-never changes underneath a running deployment. Rolling back means deploying
-the previous version's tag.
+Deployments run `ghcr.io/datakaveri/skald-dicom:latest`, which always points
+at the highest released version: tagging `v2.2.0` makes the next
+`docker pull ghcr.io/datakaveri/skald-dicom:latest` fetch 2.2.0. `:latest`
+only moves forward. A patch to an older line (say `v2.1.4` after `v2.2.0`)
+gets its own version tags but leaves `:latest` alone.
+
+Because `:latest` changes under a deployment:
+
+- run `docker pull` before each batch, so a node does not keep a stale image;
+- record the image digest with each batch
+  (`docker inspect --format '{{index .RepoDigests 0}}' ghcr.io/datakaveri/skald-dicom:latest`),
+  so you can tell which release de-identified which data;
+- a MAJOR release changes what is removed or kept, so read its CHANGELOG
+  before the next pull, or pin `:X.Y.Z` until the downstream approvals are
+  updated.
+
+Rolling back means pinning the previous `:X.Y.Z` (or its digest from the
+release notes). `:latest` itself only moves forward when a new highest
+version is released.
 
 ## Dependencies between releases
 

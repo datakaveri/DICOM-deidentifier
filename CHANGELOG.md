@@ -30,8 +30,9 @@ First tagged release. It replaces the original Flask tag-only service
 4. **Python 3.12.** The image, the locks and CI use CPython 3.12
    (3.10 reached end of life in October 2026).
 5. **Image name and tags.** Releases publish
-   `ghcr.io/datakaveri/skald-dicom:<version>` and `:v<version>`. There is no
-   `latest` tag; pin a version or digest.
+   `ghcr.io/datakaveri/skald-dicom:<version>` and `:v<version>`, and move
+   `:latest` to the highest release. Deployments run `:latest`; pin a version
+   or digest instead when a run must be reproducible.
 
 ### Security
 
