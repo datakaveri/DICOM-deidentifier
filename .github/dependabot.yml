@@ -11,11 +11,29 @@ updates:
     groups:
       pip-minor-patch:
         update-types: [minor, patch]
+    # Held back by paddlepaddle 2.6 / PaddleOCR 2.x. These move together in
+    # the planned PaddleOCR 3 migration; remove the entries then.
+    ignore:
+      - dependency-name: paddleocr
+        versions: [">=3"]
+      - dependency-name: paddlepaddle
+        versions: [">=3"]
+      - dependency-name: numpy # paddle 2.6 is built against the NumPy 1.x ABI
+        versions: [">=2"]
+      - dependency-name: pydicom # 3.x changes the tag/pixel API
+        versions: [">=3"]
+      - dependency-name: spacy # en_core_web_sm 3.7.1 requires spacy <3.8
+        versions: [">=3.8"]
 
   - package-ecosystem: docker
     directory: /
     schedule:
       interval: weekly
+    # Patch bumps of python:3.12.x-slim only: paddlepaddle 2.6.2 has no wheels
+    # beyond CPython 3.12. Lift this with the PaddleOCR 3 migration.
+    ignore:
+      - dependency-name: python
+        versions: [">=3.13"]
 
   - package-ecosystem: github-actions
     directory: /
