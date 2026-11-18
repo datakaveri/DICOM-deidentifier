@@ -12,6 +12,7 @@
 #
 # Only DICOMs and JPGs that are in INPUT_ROOT are touched; select them before
 # upload (scripts/batch/inventory.py). Tags in PRESERVE_TAGS are not changed.
+# SKALD_WORKERS / SKALD_THREADS_PER_WORKER, if set, override the auto plan.
 set -uo pipefail
 INPUT_ROOT=${INPUT_ROOT:-/data/input}
 OUTPUT_ROOT=${OUTPUT_ROOT:-/data/output}
@@ -42,6 +43,8 @@ for in_dir in "$INPUT_ROOT"/*/; do
     -e SKALD_OUTPUT_LAYOUT=mirror -e SKALD_REPORT_DIR=/app/reports \
     -e SKALD_PRESERVE_TAGS="$PRESERVE_TAGS" -e SKALD_DISCARD_INTERMEDIATES=1 \
     -e SKALD_RESUME=1 -e SKALD_KEYSTORE_SAVE_EVERY=25 \
+    ${SKALD_WORKERS:+-e SKALD_WORKERS=$SKALD_WORKERS} \
+    ${SKALD_THREADS_PER_WORKER:+-e SKALD_THREADS_PER_WORKER=$SKALD_THREADS_PER_WORKER} \
     -v "$in_dir":/app/data:ro -v "$out":/app/output -v "$rep":/app/reports \
     -v "$KEYS_DIR":/app/keys "$IMAGE" >/dev/null
   "$HERE/monitor.sh" "$name" "$rep/monitor.csv" 5 &
