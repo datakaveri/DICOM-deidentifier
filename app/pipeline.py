@@ -45,7 +45,7 @@ from classify import merge_detections, classify_phi, expand_phi_blocks, _iou
 from phi_tags import load_original_tag_values, match_against_stored_tags
 from masking import redact_pixels
 from verify import verify_redaction
-from dicom_io import decompress_pixels, write_pixels_to_dicom
+from dicom_io import decompress_pixels, render_for_display, write_pixels_to_dicom
 from de_identification.deidentify import (
     deidentify_dataset,
     deidentify_dataset_from_config,
@@ -413,20 +413,15 @@ def redact_file_pixels(
         log.info(f"         Pixel status: {status}")
         lap("write_checkpoint")
 
-        # Also save normalized 8-bit preview PNG for quick inspection
+        # Preview PNG, rendered as a viewer shows the written file (window,
+        # MONOCHROME1 inversion), not with a contrast stretch of its own.
         try:
             vis_source = (
                 cleaned_pixels_final[0]
                 if cleaned_pixels_final.ndim == 3
                 else cleaned_pixels_final
             )
-            pmin, pmax = np.percentile(vis_source, (1.0, 99.0))
-            if pmax > pmin:
-                preview_8 = np.clip(
-                    (vis_source - pmin) / (pmax - pmin) * 255.0, 0, 255
-                ).astype(np.uint8)
-            else:
-                preview_8 = vis_source.astype(np.uint8)
+            preview_8 = render_for_display(vis_source, ds)
             import cv2
 
             preview_p = preview_path or os.path.join(

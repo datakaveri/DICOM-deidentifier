@@ -146,3 +146,39 @@ def test_missing_decoder_fails_naming_the_transfer_syntax(monkeypatch):
     monkeypatch.setattr(ds, "decompress", no_decoder)
     with pytest.raises(RuntimeError, match=r"1\.2\.840\.10008\.1\.2\.4\.70"):
         decompress_pixels(ds)
+
+
+def test_write_back_keeps_12_bit_depth(tmp_path):
+    # A 12-bit image rewritten as 16-bit displays differently: viewers take
+    # the value range (and MONOCHROME1 inversion) from BitsStored.
+    ds = jpeg_lossless_dataset(12)
+    decompress_pixels(ds)
+    redacted = ds.pixel_array.copy()
+    redacted[2:10, 4:20] = redacted.min()
+    out = reread(write_pixels_to_dicom(ds, redacted), tmp_path)
+    assert (out.BitsAllocated, out.BitsStored, out.HighBit) == (16, 12, 11)
+    assert np.array_equal(out.pixel_array, redacted)
+
+
+def test_write_back_widens_only_when_values_no_longer_fit(tmp_path):
+    ds = jpeg_lossless_dataset(12)
+    decompress_pixels(ds)
+    arr = ds.pixel_array.copy()
+    arr[0, 0] = 5000  # beyond 12 bits
+    out = reread(write_pixels_to_dicom(ds, arr), tmp_path)
+    assert out.BitsStored == 16
+    assert out.pixel_array[0, 0] == 5000
+
+
+def test_preview_follows_window_and_inverts_monochrome1():
+    from dicom_io import render_for_display
+
+    ds = Dataset()
+    ds.PhotometricInterpretation = "MONOCHROME1"
+    ds.WindowCenter, ds.WindowWidth = 2047, 4095
+    arr = np.array([[0, 4095]], dtype=np.uint16)
+    img = render_for_display(arr, ds)
+    assert img[0, 0] == 255 and img[0, 1] == 0, "MONOCHROME1: low values are white"
+    ds.PhotometricInterpretation = "MONOCHROME2"
+    img = render_for_display(arr, ds)
+    assert img[0, 0] == 0 and img[0, 1] == 255
