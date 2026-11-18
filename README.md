@@ -128,6 +128,14 @@ If the input files and output directory belong to root and cannot be re-owned (t
 | `SKALD_JOB_CONFIG` | `$SKALD_CONFIG_DIR/config.json` | The decrypted SPIDEr job config (see "Job config") |
 | `SKALD_TEMP_DIR` | `/tmp/skald-dicom` | Scratch for still-identified intermediates and the run's keys under a job config; must be under `/tmp` |
 | `SKALD_SAVE_BBOX_PREVIEW` | `0` | `1` writes `bbox_regions.png` (shows PHI; local tuning only) |
+| `SKALD_OUTPUT_LAYOUT` | `per-file` | `mirror`: the de-identified file goes to `OUTPUT_DIR/<relative path>`, same name, and nothing else goes in `OUTPUT_DIR` |
+| `SKALD_REPORT_DIR` | `$SKALD_OUTPUT_DIR` | Where audits, previews, `manifest.json` and the benchmark logs go |
+| `SKALD_PRESERVE_TAGS` | (none) | Comma-separated keywords the tag pass leaves unchanged, e.g. `StudyInstanceUID,SeriesInstanceUID,SOPInstanceUID` |
+| `SKALD_DISCARD_INTERMEDIATES` | `0` | `1`: files that still hold original values go to scratch and are deleted as each file finishes |
+| `SKALD_RESUME` | `0` | `1`: skip inputs whose output and audit from an earlier successful run exist |
+| `SKALD_KEYSTORE_SAVE_EVERY` | `25` | Save the keystore every N files, not only at the end |
+
+Every run also writes `benchmark_files.jsonl` (seconds per stage and memory, one line per file) and `benchmark_summary.json` (model load, wall time, throughput, p50/p90/p99 per stage, peak memory) to the report directory. To run large batches on a VM, see [`scripts/vm/README.md`](scripts/vm/README.md).
 
 The image sizes itself to the machine it lands on (CPU affinity, cgroup CPU and memory limits, available memory), so the same image runs on an unknown TEE VM without tuning. See [`docs/performance.md`](docs/performance.md).
 

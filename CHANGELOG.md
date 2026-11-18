@@ -8,6 +8,33 @@ See [`docs/releasing.md`](docs/releasing.md).
 
 ## [Unreleased]
 
+### Changed
+
+- **Tag-first pixel classification.** Burned-in text that equals the value of
+  a tag the tag pass de-identifies is redacted directly, and only the rest
+  goes to the NER models. "De-identified" means the job config's
+  `tag_actions` or, under the fixed policy, non-retained `tag_mapping.py`
+  entries and dates; private tags count in both. Before, the text was
+  matched against every tag (Manufacturer, StationName, ...) and only after
+  NER, so burned-in copies of non-PHI values were blacked out. On the sample
+  set, the output is pixel-identical to 2.0.0.
+- With a scratch directory, each file's intermediates are deleted when the
+  file finishes, not at the end of the batch.
+
+### Added
+
+- `SKALD_OUTPUT_LAYOUT=mirror` and `SKALD_REPORT_DIR`: the output keeps the
+  input's relative paths and file names, and holds nothing else.
+- `SKALD_PRESERVE_TAGS`: tags the tag pass leaves unchanged. The meta
+  header follows a preserved `SOPInstanceUID`.
+- `SKALD_DISCARD_INTERMEDIATES`, `SKALD_RESUME` and
+  `SKALD_KEYSTORE_SAVE_EVERY` (default 25) for long batches.
+- Benchmark logs: `benchmark_files.jsonl` and `benchmark_summary.json`, plus
+  a `PROGRESS` line with ETA per file.
+- `scripts/batch/inventory.py`: Excel inventory of every DICOM's tags and the
+  chest selection. `scripts/vm/` contains VM setup, upload, batch runner and
+  monitor scripts.
+
 ## [2.0.0] — 2026-11-17
 
 The first release built by this repository's release pipeline. The images
