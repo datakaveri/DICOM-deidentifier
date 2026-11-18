@@ -8,6 +8,20 @@ See [`docs/releasing.md`](docs/releasing.md).
 
 ## [Unreleased]
 
+### Fixed
+
+- **12- and 14-bit images were rewritten as 16-bit.** Writing the redacted
+  pixels back set `BitsStored`/`HighBit` from the array type (16/15) instead
+  of keeping the original (for example 12/11). Pixel values were unchanged,
+  but viewers take the value range, and the MONOCHROME1 inversion, from
+  `BitsStored`, so contrast and brightness shifted. The original values are
+  now kept whenever the redacted pixels still fit. This affected 2,192 of
+  2,953 PACS chest X-rays in the 2026-11-18 batch.
+- **`after_preview.png` of MONOCHROME1 images was inverted**, and every
+  preview used its own percentile stretch. Previews are now rendered as a
+  viewer shows the file: rescale, the file's window, and MONOCHROME1
+  inversion.
+
 ### Changed
 
 - **Tag-first pixel classification.** Burned-in text that equals the value of
