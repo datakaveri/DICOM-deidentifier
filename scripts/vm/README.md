@@ -26,7 +26,7 @@ JPGs through unprocessed, and writes the benchmark logs under
   per-stage p50/p90/p99, and the peak memory of the container and processes.
 - `manifest.json` and per-file `pipeline_audit.json` / `tag_audit.json`.
 
-`reports/run_summary.json` combines all folders.
+`reports/run_summary.json` combines all folders. `scripts/batch/results_to_excel.py REPORT_ROOT out.xlsx` turns the reports into one workbook: a summary sheet, a per-file timing sheet for each folder, and a CPU/memory timeline sheet.
 
 A rerun skips files that already finished (`SKALD_RESUME=1`). It keeps
 pseudonyms consistent because the same `/data/keys` is reused. Never copy
