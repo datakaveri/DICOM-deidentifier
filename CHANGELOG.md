@@ -8,6 +8,18 @@ See [`docs/releasing.md`](docs/releasing.md).
 
 ## [Unreleased]
 
+### Added
+- The shared Anamika NER engine (2026-11-23), reached through a Unix socket
+  the SPIDEr enclave mounts at `/run/anamika-ner/ner.sock`; the enclave sends
+  the text to an attested NER TEE. See `app/shared_ner.py`.
+  - `free_text_anonymization` tag action: the personal data inside a free-text
+    tag is replaced (`"XR CHEST PA - [PERSON]"`) and the rest kept. If the
+    engine cannot be asked, the tag is blanked, never written out unchecked.
+  - `dicom_deidentify.shared_ner` (optional): `pixel_text` adds the engine's
+    hits on burned-in text to what the classifier redacts (only ever more);
+    `minimum_confidence` (0.75) and `model_labels` (`["PERSON"]`) tune both.
+- Without the socket, or with neither setting used, a run is unchanged.
+
 ## [2.0.0] — 2026-11-17
 
 The first release built by this repository's release pipeline. The images

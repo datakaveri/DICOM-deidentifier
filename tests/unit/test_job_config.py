@@ -177,7 +177,6 @@ def test_keyword_naming_no_dicom_tag_is_recorded_not_applied():
         "generalize",
         "date_shift",
         "uid_remap",
-        "free_text_anonymization",
         "nonsense",
     ],
 )

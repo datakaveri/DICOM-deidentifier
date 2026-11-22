@@ -160,7 +160,10 @@ def _walk(ds, keystore, audit) -> None:
 #     deidentify_dataset_from_config.
 
 from .job_config import SUPPRESS as ACTION_SUPPRESS
+from .job_config import FREE_TEXT_ANONYMIZATION
 from .actions import apply_action
+from .operations import VR_MAX_LENGTH
+import shared_ner
 from .tag_mapping import HASH, UID_VALUED_TAGS
 
 
@@ -242,9 +245,135 @@ def deidentify_dataset_from_config(ds, keystore, secrets, job_config) -> list:
         private blocks routinely carry a copy of the patient demographics.
     """
     audit = []
-    _walk_config(ds, keystore, secrets, job_config, audit)
+    free_text = _FreeTextSpans.for_dataset(ds, job_config)
+    _walk_config(ds, keystore, secrets, job_config, audit, free_text)
     _sync_file_meta(ds, audit)
     return audit
+
+
+# ── free_text_anonymization (added 2026-11-23) ───────────────────────────────
+# The personal data inside a free-text tag is replaced and the rest kept:
+# "XR CHEST PA - RAMESH KUMAR" -> "XR CHEST PA - [PERSON]". Detection is the
+# shared Anamika NER engine (shared_ner.py), asked once per file for every
+# free-text value in it. When the engine cannot be asked (no socket, an error,
+# a value it failed on), the tag is BLANKED, like suppress: a value nobody
+# could check is not written out on the assumption it was clean.
+
+# Tag VRs whose value is text a person typed. Anything else (dates, numbers,
+# UIDs, binary) has no free text in it; free_text_anonymization on one is a
+# config mistake and the element is blanked, with the reason in the audit.
+FREE_TEXT_VRS = frozenset({"LO", "LT", "ST", "UT", "SH", "PN", "UC"})
+
+
+def _free_text_elements(ds, job_config):
+    """Every element, nested sequences included, that free_text_anonymization
+    applies to -- the same traversal _walk_config makes."""
+    for elem in ds:
+        if elem.tag.group % 2 == 1:
+            continue
+        tag_action = job_config.action_for((elem.tag.group, elem.tag.element))
+        if elem.VR == "SQ":
+            if tag_action is not None and tag_action.action == ACTION_SUPPRESS:
+                continue
+            for item in elem.value:
+                yield from _free_text_elements(item, job_config)
+            continue
+        if tag_action is not None and tag_action.action == FREE_TEXT_ANONYMIZATION:
+            yield elem
+
+
+def _values(raw_value):
+    items = raw_value if isinstance(raw_value, (list, MultiValue)) else [raw_value]
+    return ["" if item is None else str(item) for item in items]
+
+
+class _FreeTextSpans:
+    """Spans per free-text value of one dataset; None = could not be checked."""
+
+    def __init__(self, spans_by_text):
+        self._spans = spans_by_text
+
+    @classmethod
+    def for_dataset(cls, ds, job_config):
+        texts = sorted(
+            {
+                v
+                for elem in _free_text_elements(ds, job_config)
+                if elem.VR in FREE_TEXT_VRS
+                for v in _values(elem.value)
+                if not should_skip_value(v)
+            }
+        )
+        if not texts:
+            return cls({})
+        settings = job_config.shared_ner
+        found = shared_ner.spans_many(
+            texts, settings.minimum_confidence, settings.model_labels
+        )
+        if found is None:
+            return cls({text: None for text in texts})
+        return cls(dict(zip(texts, found)))
+
+    def spans(self, text):
+        return self._spans.get(text)
+
+
+def _redact_spans(text, spans, vr):
+    """`text` with each span replaced by its label, e.g. "[PERSON]". If that
+    no longer fits the VR's length limit, each span is overwritten with "*"
+    instead, which keeps the length exactly."""
+    spans = sorted(spans, key=lambda s: (s["start"], -s["end"]))
+    merged = []
+    for s in spans:  # overlapping detections become one replacement
+        if merged and s["start"] < merged[-1]["end"]:
+            merged[-1]["end"] = max(merged[-1]["end"], s["end"])
+        else:
+            merged.append(dict(s))
+    labelled, starred, pos = [], [], 0
+    for s in merged:
+        labelled += [text[pos : s["start"]], f"[{s['label'].upper()}]"]
+        starred += [text[pos : s["start"]], "*" * (s["end"] - s["start"])]
+        pos = s["end"]
+    labelled.append(text[pos:])
+    starred.append(text[pos:])
+    out = "".join(labelled)
+    max_len = VR_MAX_LENGTH.get(vr)
+    return "".join(starred) if max_len and len(out) > max_len else out
+
+
+def _apply_free_text(ds, elem, tag_action, free_text, audit):
+    """free_text_anonymization on one element; see the section comment."""
+    if elem.VR not in FREE_TEXT_VRS:
+        _suppress_element(ds, elem, audit, tag_action.keyword)
+        audit[-1]["technique"] = FREE_TEXT_ANONYMIZATION
+        audit[-1]["action"] = f"blanked-not-free-text-vr-{elem.VR}"
+        return
+    values = _values(elem.value)
+    out, found = [], 0
+    for v in values:
+        if should_skip_value(v):
+            out.append(v)
+            continue
+        spans = free_text.spans(v)
+        if spans is None:
+            _suppress_element(ds, elem, audit, tag_action.keyword)
+            audit[-1]["technique"] = FREE_TEXT_ANONYMIZATION
+            audit[-1]["action"] = "blanked-ner-unavailable"
+            return
+        found += len(spans)
+        out.append(_redact_spans(v, spans, elem.VR) if spans else v)
+    if found:
+        elem.value = out if isinstance(elem.value, (list, MultiValue)) else out[0]
+    audit.append(
+        {
+            "tag": str(elem.tag),
+            "field": tag_action.keyword,
+            "technique": FREE_TEXT_ANONYMIZATION,
+            # counts only: the audit never carries a value or a detection
+            "action": f"redacted-{found}-span(s)" if found else "no-personal-data-found",
+            "changed": bool(found),
+        }
+    )
 
 
 def _sync_file_meta(ds, audit) -> None:
@@ -269,7 +398,7 @@ def _sync_file_meta(ds, audit) -> None:
     )
 
 
-def _walk_config(ds, keystore, secrets, job_config, audit) -> None:
+def _walk_config(ds, keystore, secrets, job_config, audit, free_text=None) -> None:
     for elem in list(ds):  # list(...) snapshot: safe to delete while iterating
         tag_id = (elem.tag.group, elem.tag.element)
         is_private = (elem.tag.group % 2) == 1
@@ -300,7 +429,7 @@ def _walk_config(ds, keystore, secrets, job_config, audit) -> None:
             # No scalar to transform: recurse so a nested PatientID is matched
             # by its own tag and treated exactly like a top-level one.
             for item in elem.value:
-                _walk_config(item, keystore, secrets, job_config, audit)
+                _walk_config(item, keystore, secrets, job_config, audit, free_text)
             continue
 
         if tag_action is None:
@@ -309,6 +438,10 @@ def _walk_config(ds, keystore, secrets, job_config, audit) -> None:
 
         if tag_action.action == ACTION_SUPPRESS:
             _suppress_element(ds, elem, audit, tag_action.keyword)
+            continue
+
+        if tag_action.action == FREE_TEXT_ANONYMIZATION:
+            _apply_free_text(ds, elem, tag_action, free_text or _FreeTextSpans({}), audit)
             continue
 
         new_value, changed = _apply_to_value(

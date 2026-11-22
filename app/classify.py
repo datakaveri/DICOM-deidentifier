@@ -330,10 +330,18 @@ def classify_phi(
     gliner_model=None,
     medical_ner=None,
     deid_model=None,
+    shared_ner_phi=None,
 ):
     """
     Classifies each merged detection as PHI (redact) or safe (keep).
     Uses a 3-Step Hybrid Medical Preservation Stack alongside Stanford De-ID & PII models.
+
+    shared_ner_phi (added 2026-11-23): the texts the shared Anamika NER engine
+    found personal data in (pipeline._shared_ner_phi_texts). Such a text is
+    redacted even where the matrix below would keep it -- typically a name the
+    biomedical models mistook for a medical entity -- unless the clinical
+    allowlist says it is a marker. It only ever adds redactions; None (the
+    default, and every run that does not ask for it) changes nothing.
     """
     h, w = image_shape[:2]
     phi_regions = []
@@ -769,6 +777,13 @@ def classify_phi(
             _DECISION_CACHE[key] = decision
         is_phi, reasons = decision
         reason = list(reasons)
+        if (
+            not is_phi
+            and shared_ner_phi
+            and clean_text in shared_ner_phi
+            and reasons != ("clinical:allowlist",)
+        ):
+            is_phi, reason = True, ["shared_ner"]
 
         # The OCR'd text is never logged: for REDACT decisions it is the PHI.
         if is_phi:

@@ -47,6 +47,27 @@ from de_identification.deidentify import (
     deidentify_dataset_from_config,
 )
 from bbox_visualize import save_bbox_image
+import shared_ner
+
+
+def _shared_ner_phi_texts(merged, job_config):
+    """The OCR texts the shared Anamika NER engine finds personal data in, or
+    None when this run did not ask for it (dicom_deidentify.shared_ner
+    .pixel_text) or the engine could not be asked -- classify_phi then decides
+    exactly as it always has. Added 2026-11-23; see shared_ner.py."""
+    if job_config is None or not job_config.shared_ner.pixel_text:
+        return None
+    texts = sorted({d["text"].strip() for d in merged if d["text"].strip()})
+    if not texts:
+        return None
+    settings = job_config.shared_ner
+    found = shared_ner.spans_many(texts, settings.minimum_confidence, settings.model_labels)
+    if found is None:
+        log.info("            Shared NER unavailable: own classifier only.")
+        return None
+    flagged = {t for t, spans in zip(texts, found) if spans}
+    log.info(f"            Shared NER flagged {len(flagged)} of {len(texts)} text(s).")
+    return flagged
 
 
 def anonymize_dicom_file(
@@ -251,7 +272,13 @@ def redact_file_pixels(
         log.info("  [Stage 4] Classifying detections (PHI vs clinical)...")
         merged = merge_detections(raw_det)
         phi_regions = classify_phi(
-            merged, ocr_frame.shape, analyzer, gliner_model, medical_ner, deid_model
+            merged,
+            ocr_frame.shape,
+            analyzer,
+            gliner_model,
+            medical_ner,
+            deid_model,
+            shared_ner_phi=_shared_ner_phi_texts(merged, job_config),
         )
         phi_regions = expand_phi_blocks(merged, phi_regions, ocr_frame.shape)
         log.info(f"            PHI regions to redact: {len(phi_regions)}")

@@ -15,8 +15,8 @@ Two shapes are supported, and which one arrives decides which policy runs:
   - With a `dicom_deidentify` block -- the user picked per-tag actions in the
     UI and `tag_actions` drives the run.
 
-Only `tag_actions` (and `default_action`, always "keep") is read from the
-wire. Every other field in the block -- input_dir, output_dir, temp_dir,
+Only `tag_actions`, the optional `shared_ner` settings (2026-11-23) and
+`default_action` (always "keep") are read from the wire. Every other field in the block -- input_dir, output_dir, temp_dir,
 emit_pixel_text_report, emit_uid_crosswalk, fail_on_unparsable and the whole
 `pixel` object -- is fixed policy, taken from config.py and enforced here: a
 wire value that disagrees is logged and discarded rather than honoured. A
@@ -53,6 +53,13 @@ ENCRYPT = "encrypt"
 MASKING = "masking"
 TOKENIZATION = "tokenization"
 CHARCLOAK = "charcloak"
+# Added 2026-11-23: the tabular pipeline's seventh technique, which the
+# contract (docs/dicom-deidentify-config-contract.md section 3.3 in the UI
+# repo) reserved for exactly this: redact the personal data INSIDE a free-text
+# tag (StudyDescription, remarks...) and keep the rest, instead of keeping or
+# blanking the whole value. Detection is the shared Anamika NER engine
+# (shared_ner.py); see actions.free_text for the fallbacks.
+FREE_TEXT_ANONYMIZATION = "free_text_anonymization"
 
 SUPPORTED_ACTIONS = frozenset(
     {
@@ -62,6 +69,7 @@ SUPPORTED_ACTIONS = frozenset(
         MASKING,
         TOKENIZATION,
         CHARCLOAK,
+        FREE_TEXT_ANONYMIZATION,
     }
 )
 
@@ -163,6 +171,53 @@ class TagAction:
         return f"<TagAction {self.keyword} {self.action}>"
 
 
+class SharedNerSettings:
+    """`dicom_deidentify.shared_ner` (optional, added 2026-11-23).
+
+    pixel_text          also run the shared NER engine over the burned-in text
+                        OCR finds; its hits are redacted IN ADDITION to what
+                        this pipeline's own classifier redacts (never instead)
+    minimum_confidence  engine detections below this are ignored (0-1)
+    model_labels        model entity types to act on, of PERSON / LOCATION /
+                        ORGANIZATION; rule detections (IDs, phone numbers,
+                        e-mails, dates) always count
+
+    The same minimum_confidence and model_labels apply to the
+    free_text_anonymization tag action. A config without the block gets the
+    defaults below and no pixel pass: a document from an older UI runs exactly
+    as before.
+    """
+
+    def __init__(self, pixel_text=False, minimum_confidence=0.75, model_labels=("PERSON",)):
+        self.pixel_text = pixel_text
+        self.minimum_confidence = minimum_confidence
+        self.model_labels = tuple(model_labels)
+
+    def __repr__(self):
+        return (
+            f"<SharedNer pixel_text={self.pixel_text} "
+            f"min={self.minimum_confidence} labels={list(self.model_labels)}>"
+        )
+
+
+def _parse_shared_ner(raw):
+    if raw is None:
+        return SharedNerSettings()
+    if not isinstance(raw, dict):
+        raise JobConfigError("'shared_ner' must be an object")
+    pixel_text = raw.get("pixel_text", False)
+    if not isinstance(pixel_text, bool):
+        raise JobConfigError("shared_ner.pixel_text must be true or false")
+    conf = raw.get("minimum_confidence", 0.75)
+    if isinstance(conf, bool) or not isinstance(conf, (int, float)) or not 0 <= conf <= 1:
+        raise JobConfigError("shared_ner.minimum_confidence must be a number from 0 to 1")
+    labels = raw.get("model_labels", ["PERSON"])
+    allowed = ("PERSON", "LOCATION", "ORGANIZATION")
+    if not isinstance(labels, list) or not all(x in allowed for x in labels):
+        raise JobConfigError(f"shared_ner.model_labels must be a list of {list(allowed)}")
+    return SharedNerSettings(pixel_text, float(conf), labels or ["PERSON"])
+
+
 class JobConfig:
     """A parsed job config carrying a `dicom_deidentify` block.
 
@@ -181,6 +236,7 @@ class JobConfig:
         tag_actions=None,
         ingest_mode=None,
         unresolved_keywords=None,
+        shared_ner=None,
     ):
         self.data_type = data_type
         self.dataset_name = dataset_name
@@ -192,6 +248,7 @@ class JobConfig:
         # Keywords from tag_actions that name no DICOM tag. Surfaced in the
         # manifest so a UI sending one can see it was not applied.
         self.unresolved_keywords = unresolved_keywords or []
+        self.shared_ner = shared_ner or SharedNerSettings()
 
         # Fixed policy, from config.py -- never from the document.
         self.input_dir = config.INPUT_DIR
@@ -271,9 +328,9 @@ def _parse_operations(raw):
         raise JobConfigError(
             f"Unsupported operation(s) {unknown}: this application implements "
             f"{sorted(SUPPORTED_ACTIONS)} plus '{DICOM_DEIDENTIFY}'. "
-            f"There is deliberately no generalize, date_shift, uid_remap or "
-            f"free_text_anonymization -- coarsening a date is expressed as "
-            f"'masking' over its month/day positions."
+            f"There is deliberately no generalize, date_shift or uid_remap -- "
+            f"coarsening a date is expressed as 'masking' over its month/day "
+            f"positions."
         )
     return raw
 
@@ -433,6 +490,7 @@ def parse_job_config(document):
 
     operations = _parse_operations(document.get("operations"))
     tag_actions, unresolved = _parse_tag_actions(block.get("tag_actions"))
+    shared_ner = _parse_shared_ner(block.get("shared_ner"))
 
     # operations is documented as "dicom_deidentify plus every action used
     # below". A mismatch is a UI inconsistency, not a safety problem --
@@ -455,6 +513,7 @@ def parse_job_config(document):
         tag_actions=tag_actions,
         ingest_mode=document.get("ingest_mode"),
         unresolved_keywords=unresolved,
+        shared_ner=shared_ner,
     )
 
     log.info(
@@ -463,7 +522,8 @@ def parse_job_config(document):
         f"server constants (temp_dir={cfg.temp_dir}, "
         f"emit_pixel_text_report={cfg.emit_pixel_text_report}, "
         f"emit_uid_crosswalk={cfg.emit_uid_crosswalk}, "
-        f"fail_on_unparsable={cfg.fail_on_unparsable}, pixel={cfg.pixel})."
+        f"fail_on_unparsable={cfg.fail_on_unparsable}, pixel={cfg.pixel}, "
+        f"shared_ner={cfg.shared_ner})."
     )
     return cfg
 
