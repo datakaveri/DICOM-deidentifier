@@ -32,6 +32,24 @@ class KeyStore:
         self.fpe_encrypt_keys = data.get("fpe_encrypt_keys", {})
         self.hash_keys = data.get("hash_keys", {})
 
+    @classmethod
+    def in_memory(cls, data=None):
+        """A KeyStore that never touches the filesystem (save() is a no-op).
+        `data` is the same shape secured.json holds ({"hash_keys": {...},
+        "symmetric_keys": ..., "fpe_encrypt_keys": ..., "fpe_keys": ...,
+        "token_vault": ...}); keys it lacks are generated on first use, as
+        with a file-backed store. Used by single_file.process_file, where the
+        caller owns key material and nothing may be written."""
+        store = object.__new__(cls)
+        store.path = None
+        data = data or {}
+        store._token_vault = data.get("token_vault", {})
+        store.fpe_keys = data.get("fpe_keys", {})
+        store.symmetric_keys = data.get("symmetric_keys", {})
+        store.fpe_encrypt_keys = data.get("fpe_encrypt_keys", {})
+        store.hash_keys = data.get("hash_keys", {})
+        return store
+
     def _load(self) -> dict:
         if not os.path.exists(self.path):
             return {}
@@ -83,6 +101,8 @@ class KeyStore:
 
     def save(self) -> None:
         """Writes all key material back to the single secured.json file, atomically."""
+        if self.path is None:  # in_memory(): nothing to write
+            return
         data = {
             "token_vault": self._token_vault,
             "fpe_keys": self.fpe_keys,
