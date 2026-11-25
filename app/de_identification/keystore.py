@@ -31,6 +31,8 @@ class KeyStore:
         self.symmetric_keys = data.get("symmetric_keys", {})
         self.fpe_encrypt_keys = data.get("fpe_encrypt_keys", {})
         self.hash_keys = data.get("hash_keys", {})
+        # Job-wide UID HMAC key; None keeps the per-tag hash keys (see uids.py).
+        self.uid_key = None
 
     @classmethod
     def in_memory(cls, data=None):
@@ -48,6 +50,7 @@ class KeyStore:
         store.symmetric_keys = data.get("symmetric_keys", {})
         store.fpe_encrypt_keys = data.get("fpe_encrypt_keys", {})
         store.hash_keys = data.get("hash_keys", {})
+        store.uid_key = None
         return store
 
     def _load(self) -> dict:

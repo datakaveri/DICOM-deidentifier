@@ -168,3 +168,66 @@ def test_models_are_reused_not_reloaded():
     for _ in range(3):
         assert process_file(make_dicom(), "x.dcm", JOB, eng).ok
     assert eng.paddle_ocr is ocr and len(eng._job_configs) == 1
+
+
+# ── job-wide UID remap (keys.uid_key) ────────────────────────────────────────
+from pydicom.dataset import Dataset  # noqa: E402
+from pydicom.sequence import Sequence  # noqa: E402
+
+SERIES_A = "1.2.826.0.1.3680043.8.498.20"
+INSTANCE_B = "1.2.826.0.1.3680043.8.498.30"
+
+
+def with_references():
+    ds = pydicom.dcmread(io.BytesIO(make_dicom()))
+    ref = Dataset()
+    ref.ReferencedSOPClassUID = ds.SOPClassUID
+    ref.ReferencedSOPInstanceUID = INSTANCE_B
+    ser = Dataset()
+    ser.SeriesInstanceUID = SERIES_A
+    ser.ReferencedSOPSequence = Sequence([ref])
+    ds.ReferencedSeriesSequence = Sequence([ser])
+    ds.FrameOfReferenceUID = "1.2.826.0.1.3680043.8.498.40"
+    buf = io.BytesIO()
+    ds.save_as(buf, write_like_original=False)
+    return buf.getvalue()
+
+
+def uids_of(res):
+    ds = pydicom.dcmread(io.BytesIO(res.output))
+    ref = ds.ReferencedSeriesSequence[0]
+    return ds, ref
+
+
+def test_uid_key_remaps_every_uid_consistently_across_workers():
+    for base in ({}, JOB):  # fixed policy and job-config policy
+        cfg = dict(base, keys={"uid_key": "job-secret", "salt": "ab" * 32})
+        a = run(with_references(), config=cfg, ner=FakeNer())
+        b = run(with_references(), config=cfg, ner=FakeNer())  # a different Engines
+        # (other fixed-policy tags use random per-tag keys unless passed, so
+        # compare the UIDs, which are what uid_key governs)
+        ds, ref = uids_of(a)
+        ds_b, ref_b = uids_of(b)
+        assert ds.SOPInstanceUID == ds_b.SOPInstanceUID and ds.StudyInstanceUID == ds_b.StudyInstanceUID
+        assert ref.SeriesInstanceUID == ref_b.SeriesInstanceUID
+        seen = {str(e.value) for e in ds.iterall() if e.VR == "UI"}
+        for original in (SERIES_A, INSTANCE_B, "1.2.826.0.1.3680043.8.498.1", "1.2.826.0.1.3680043.8.498.10",
+                         "1.2.826.0.1.3680043.8.498.40"):
+            assert original not in seen
+        assert ds.SOPClassUID == "1.2.840.10008.5.1.4.1.1.1"  # a class, kept
+        assert ref.ReferencedSOPSequence[0].ReferencedSOPClassUID == ds.SOPClassUID
+        assert ds.file_meta.MediaStorageSOPInstanceUID == ds.SOPInstanceUID
+        # same input UID, same output UID, whichever tag it sits in
+        from de_identification.uids import hmac_uid
+
+        assert ref.ReferencedSOPSequence[0].ReferencedSOPInstanceUID == hmac_uid("job-secret", INSTANCE_B)
+        assert ds.SOPInstanceUID == hmac_uid("job-secret", "1.2.826.0.1.3680043.8.498.10")
+        other = run(with_references(), config=dict(cfg, keys={"uid_key": "different"}), ner=FakeNer())
+        assert uids_of(other)[0].SOPInstanceUID != ds.SOPInstanceUID
+
+
+def test_without_uid_key_the_old_uid_policy_is_untouched():
+    res = run(with_references(), ner=FakeNer())
+    ds, ref = uids_of(res)
+    # no uid_key: the unnamed referenced UIDs pass through, as before
+    assert ref.ReferencedSOPSequence[0].ReferencedSOPInstanceUID == INSTANCE_B

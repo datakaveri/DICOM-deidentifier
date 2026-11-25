@@ -69,7 +69,10 @@ class Keys:
         self.keystore = keystore if keystore is not None else KeyStore.in_memory()
         self._secrets = secrets
         self._salt = None
+        # The HMAC key that remaps every UID the same way across the job
+        # (de_identification/uids.py). None keeps the per-tag hash policy.
         self.uid_key = uid_key
+        self.keystore.uid_key = uid_key
 
     @property
     def secrets(self):
@@ -206,6 +209,7 @@ def process_file(data, rel_path, config, engines, keys=None):
     # Imported here: pipeline pulls in OCR/classification modules and the
     # engine libraries, which a caller importing only FileResult must not pay for.
     from de_identification.job_config import JobConfigError
+    from de_identification.uids import remap_unlisted_uids, sync_file_meta_uid
     from phi_tags import original_tag_values, snapshot_original_tags
     from pipeline import (
         _deidentify_tags,
@@ -266,9 +270,16 @@ def process_file(data, rel_path, config, engines, keys=None):
         ds.save_as(checkpoint, write_like_original=False)
         checkpoint.seek(0)
         ds = pydicom.dcmread(checkpoint, force=True)
+        uid_audit = []
+        if keys.uid_key:
+            # UIDs no policy names (referenced series/instances, ...) first;
+            # the policy pass then maps the named ones with the same HMAC.
+            remap_unlisted_uids(ds, keys.uid_key, job_config, uid_audit)
         raw["deidentified_tags"] = _deidentify_tags(
             ds, keys.keystore, keys.secrets if job_config is not None else None, job_config, ner=engines.ner
-        )
+        ) + uid_audit
+        if keys.uid_key:
+            sync_file_meta_uid(ds)
         out = io.BytesIO()
         ds.save_as(out, write_like_original=False)
         raw["output_transfer_syntax"] = str(ds.file_meta.TransferSyntaxUID)

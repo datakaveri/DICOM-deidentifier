@@ -150,6 +150,14 @@ def apply_technique(technique: str, value: str, elem, keystore, tag_id) -> str:
         return value
 
     if technique == HASH:
+        # With a job-wide uid_key (single_file.Keys), every UID, whatever tag
+        # it is in, goes through one HMAC so equal UIDs stay equal across tags
+        # and files; without one, the per-tag hash key below, as before.
+        uid_key = getattr(keystore, "uid_key", None)
+        if uid_key and (tag_id in UID_VALUED_TAGS or elem.VR == "UI"):
+            from .uids import hmac_uid
+
+            return hmac_uid(uid_key, value)
         key = keystore.get_or_create_hash_key(column)
         if tag_id in UID_VALUED_TAGS or elem.VR == "UI":
             return hash_to_uid(value, key)
