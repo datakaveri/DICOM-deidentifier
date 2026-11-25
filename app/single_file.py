@@ -192,6 +192,7 @@ def _phi_free_audit(raw, job_config, timings):
         "redacted_region_boxes": [r.get("bbox") for r in raw.get("redacted_regions", [])],
         "source_transfer_syntax": raw.get("source_transfer_syntax"),
         "output_transfer_syntax": raw.get("output_transfer_syntax"),
+        "overlay_planes_removed": raw.get("overlay_planes_removed", 0),
         "tags": tags,
         "tags_by_technique": by_technique,
         "timings_s": timings,

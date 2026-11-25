@@ -103,3 +103,42 @@ def write_pixels_to_dicom(ds, cleaned_array):
     _set_pixel_data(ds, arr)
 
     return ds
+
+
+def strip_overlays(ds):
+    """Removes every overlay plane (repeating groups 6000-60FE, even) from `ds`
+    and from nested sequence items, in place.
+
+    Overlay planes can carry burned-in annotation (names, IDs) as bitmaps the
+    OCR never sees, so they go. The old code only looked at groups 6000-601E.
+
+    Returns {"planes": n, "embedded_bits": [...]}: the number of distinct
+    overlay groups removed, and the pixel bit positions of any plane stored in
+    the unused high bits of Pixel Data (Overlay Data absent, Overlay Bit
+    Position >= Bits Stored) -- deleting the tags would leave that bitmap in
+    the pixels, so the caller must mask those bits (mask_embedded_overlay_bits).
+    """
+    groups, embedded = set(), []
+
+    def walk(item, top):
+        for elem in list(item):
+            if elem.VR == "SQ":
+                for sub in elem.value:
+                    walk(sub, False)
+            g = elem.tag.group
+            if 0x6000 <= g <= 0x60FF and g % 2 == 0:
+                if top and elem.tag.element == 0x0102 and (g, 0x3000) not in item:
+                    embedded.append(int(elem.value))
+                groups.add((id(item), g))
+                del item[elem.tag]
+
+    walk(ds, True)
+    return {"planes": len(groups), "embedded_bits": embedded}
+
+
+def mask_embedded_overlay_bits(pixels, bits_stored):
+    """Zeroes the bits above Bits Stored in an unsigned pixel array, where an
+    embedded overlay plane lives. Returns the array (a masked copy)."""
+    if pixels.dtype.kind != "u" or bits_stored >= pixels.dtype.itemsize * 8:
+        return pixels
+    return pixels & pixels.dtype.type((1 << bits_stored) - 1)

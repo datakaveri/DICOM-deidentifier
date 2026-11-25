@@ -231,3 +231,36 @@ def test_without_uid_key_the_old_uid_policy_is_untouched():
     ds, ref = uids_of(res)
     # no uid_key: the unnamed referenced UIDs pass through, as before
     assert ref.ReferencedSOPSequence[0].ReferencedSOPInstanceUID == INSTANCE_B
+
+
+# ── overlay planes ───────────────────────────────────────────────────────────
+def with_overlays():
+    ds = pydicom.dcmread(io.BytesIO(make_dicom(pixels=False)))
+    img = np.full((128, 128), 100, np.uint16)
+    img[40:50, 40:90] |= 1 << 12  # an overlay bitmap stored in bit 12 of the pixels
+    ds.PhotometricInterpretation = "MONOCHROME2"
+    ds.SamplesPerPixel, ds.Rows, ds.Columns = 1, 128, 128
+    ds.BitsAllocated, ds.BitsStored, ds.HighBit, ds.PixelRepresentation = 16, 12, 11, 0
+    ds.PixelData = img.tobytes()
+    ds["PixelData"].VR = "OW"
+    for g in (0x6000, 0x6002, 0x6020, 0x60FE):  # 6020+ were missed before
+        ds.add_new((g, 0x0010), "US", 128)
+        ds.add_new((g, 0x0011), "US", 128)
+        ds.add_new((g, 0x0100), "US", 1)
+        ds.add_new((g, 0x1500), "LO", "PATIENT NAME BURNED INTO OVERLAY")
+    ds.add_new((0x6000, 0x3000), "OW", b"\xff" * 2048)
+    ds.add_new((0x6002, 0x0102), "US", 12)  # embedded plane: no Overlay Data
+    buf = io.BytesIO()
+    ds.save_as(buf, write_like_original=False)
+    return buf.getvalue()
+
+
+def test_every_overlay_plane_and_embedded_overlay_bits_are_removed():
+    for cfg in ({}, JOB):
+        res = run(with_overlays(), config=cfg, ner=FakeNer())
+        assert res.ok
+        out = pydicom.dcmread(io.BytesIO(res.output))
+        assert not [e for e in out if 0x6000 <= e.tag.group <= 0x60FF]
+        assert b"BURNED INTO OVERLAY" not in res.output
+        assert out.pixel_array.max() < (1 << 12)  # bit 12 bitmap cleared
+        assert res.audit["verification_status"] is not None

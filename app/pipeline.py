@@ -41,7 +41,12 @@ from classify import merge_detections, classify_phi, expand_phi_blocks, _iou
 from phi_tags import load_original_tag_values, match_against_stored_tags
 from masking import redact_pixels
 from verify import verify_redaction
-from dicom_io import decompress_pixels, write_pixels_to_dicom
+from dicom_io import (
+    decompress_pixels,
+    mask_embedded_overlay_bits,
+    strip_overlays,
+    write_pixels_to_dicom,
+)
 from de_identification.deidentify import (
     deidentify_dataset,
     deidentify_dataset_from_config,
@@ -240,12 +245,17 @@ def redact_dataset_pixels(
     pixels = ds.pixel_array.copy()
     original_dtype = pixels.dtype
 
-    # Strip overlay planes (group 60xx) if present
-    overlay_groups = [g for g in range(0x6000, 0x601F, 2)]
-    for group in overlay_groups:
-        for elem in list(ds):
-            if elem.tag.group == group:
-                del ds[elem.tag]
+    # Strip overlay planes (every 60xx group), and clear any plane that lives
+    # in the unused high bits of the pixels themselves.
+    bits_stored = int(ds.get("BitsStored", 0) or 0)
+    overlays = strip_overlays(ds)
+    if overlays["planes"]:
+        audit["overlay_planes_removed"] = overlays["planes"]
+        log.info(f"  Removed {overlays['planes']} overlay plane(s).")
+    if overlays["embedded_bits"] and bits_stored:
+        if any(b >= bits_stored for b in overlays["embedded_bits"]):
+            pixels = mask_embedded_overlay_bits(pixels, bits_stored)
+            audit["overlay_bits_cleared"] = True
 
     # Fix MONOCHROME1 inversion (dark=bright for OCR correctness)
     photometric = getattr(ds, "PhotometricInterpretation", "MONOCHROME2")
