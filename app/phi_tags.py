@@ -80,11 +80,12 @@ def identify_phi_tags(ds: pydicom.Dataset) -> list:
     return found
 
 
-def dump_original_tags(ds: pydicom.Dataset, path: str) -> None:
-    """Snapshot every tag's original value to a JSON file, before any
-    de-identification runs. Bulk binary data (pixel data, VR OB/OW/UN) is
-    skipped since it isn't PHI in itself and isn't useful in a text snapshot.
-    """
+def snapshot_original_tags(ds: pydicom.Dataset) -> list:
+    """Every tag's original value as a list of {tag, keyword, vr, value}.
+    Bulk binary data (pixel data, VR OB/OW/UN) is skipped since it isn't PHI
+    in itself and isn't useful in a text snapshot. The in-memory half of
+    dump_original_tags, split out so single_file.process_file can use it
+    without touching the filesystem."""
     snapshot = []
     for elem in ds.iterall():
         if elem.VR in ("SQ", "OB", "OW", "UN") or elem.keyword == "PixelData":
@@ -101,6 +102,13 @@ def dump_original_tags(ds: pydicom.Dataset, path: str) -> None:
                 "value": value,
             }
         )
+    return snapshot
+
+
+def dump_original_tags(ds: pydicom.Dataset, path: str) -> None:
+    """Snapshot every tag's original value to a JSON file, before any
+    de-identification runs (see snapshot_original_tags)."""
+    snapshot = snapshot_original_tags(ds)
 
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
@@ -124,7 +132,12 @@ def load_original_tag_values(path: str) -> list:
 
     with open(path, "r") as f:
         snapshot = json.load(f)
+    return original_tag_values(snapshot)
 
+
+def original_tag_values(snapshot: list) -> list:
+    """The match values load_original_tag_values describes, from an in-memory
+    snapshot (snapshot_original_tags) instead of data.json."""
     values = []
     for entry in snapshot:
         val = (entry.get("value") or "").strip()

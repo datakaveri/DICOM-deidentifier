@@ -218,7 +218,7 @@ def _apply_to_value(tag_action, raw_value, elem, tag_id, keystore, secrets):
     return apply_action(tag_action, text, elem, tag_id, keystore, secrets), True
 
 
-def deidentify_dataset_from_config(ds, keystore, secrets, job_config) -> list:
+def deidentify_dataset_from_config(ds, keystore, secrets, job_config, ner=None) -> list:
     """Applies `job_config.tag_actions` to `ds`, mutated in place (including
     nested sequence items). Returns the same audit-trail shape as
     deidentify_dataset -- {"tag", "field", "technique", "action", "changed"}
@@ -245,7 +245,7 @@ def deidentify_dataset_from_config(ds, keystore, secrets, job_config) -> list:
         private blocks routinely carry a copy of the patient demographics.
     """
     audit = []
-    free_text = _FreeTextSpans.for_dataset(ds, job_config)
+    free_text = _FreeTextSpans.for_dataset(ds, job_config, ner)
     _walk_config(ds, keystore, secrets, job_config, audit, free_text)
     _sync_file_meta(ds, audit)
     return audit
@@ -294,7 +294,7 @@ class _FreeTextSpans:
         self._spans = spans_by_text
 
     @classmethod
-    def for_dataset(cls, ds, job_config):
+    def for_dataset(cls, ds, job_config, ner=None):
         texts = sorted(
             {
                 v
@@ -307,9 +307,8 @@ class _FreeTextSpans:
         if not texts:
             return cls({})
         settings = job_config.shared_ner
-        found = shared_ner.spans_many(
-            texts, settings.minimum_confidence, settings.model_labels
-        )
+        # `ner` is an injected client; None keeps the unix-socket client.
+        found = shared_ner.resolve_client(ner, settings).spans(texts)
         if found is None:
             return cls({text: None for text in texts})
         return cls(dict(zip(texts, found)))

@@ -140,3 +140,78 @@ def spans_many(texts, minimum_confidence=0.75, model_labels=DEFAULT_MODEL_LABELS
         )
         return None
     return out
+
+
+# ── Injectable client (added for single_file.Engines) ────────────────────────
+# A caller that already holds an NER engine (a Ray actor with its own client)
+# can pass any object with `spans(texts) -> list[list[dict]]`, a span being
+# {"start", "end", "label"[, "confidence"]}. The contract is the same as
+# spans_many's: None for the whole call (or for one text's slot) means "could
+# not be checked", and the caller then blanks the tag / keeps its own
+# classifier. The socket client below stays the default, so production is
+# unchanged.
+
+
+class SocketNerClient:
+    """The default client: the enclave's unix socket, via spans_many."""
+
+    def __init__(self, minimum_confidence=0.75, model_labels=DEFAULT_MODEL_LABELS):
+        self.minimum_confidence = minimum_confidence
+        self.model_labels = tuple(model_labels)
+
+    def spans(self, texts):
+        return spans_many(texts, self.minimum_confidence, self.model_labels)
+
+
+class _CheckedClient:
+    """Wraps an injected client so it obeys the job's settings the way the
+    socket path does: unknown labels, bad offsets and low-confidence spans are
+    dropped, and a client that raises counts as unavailable (never fail a file
+    because NER did)."""
+
+    def __init__(self, client, settings):
+        self._client = client
+        self._labels = tuple(x for x in settings.model_labels if x in MODEL_LABELS) or DEFAULT_MODEL_LABELS
+        self._min = settings.minimum_confidence
+
+    def spans(self, texts):
+        texts = list(texts)
+        if not texts:
+            return []
+        try:
+            raw = self._client.spans(texts)
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"  [injected NER] unavailable ({type(e).__name__}); treating as unchecked.")
+            return None
+        if raw is None or len(raw) != len(texts):
+            return None
+        out = []
+        for text, found in zip(texts, raw):
+            if found is None:
+                out.append(None)
+                continue
+            kept = []
+            for s in found:
+                try:
+                    a, b = int(s["start"]), int(s["end"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                label = str(s.get("label") or "")
+                if not 0 <= a < b <= len(text):
+                    continue
+                if label in MODEL_LABELS and label not in self._labels:
+                    continue
+                conf = s.get("confidence")
+                if conf is not None and float(conf) < self._min:
+                    continue
+                kept.append({"start": a, "end": b, "label": label, "confidence": float(conf or 0)})
+            out.append(kept)
+        return out
+
+
+def resolve_client(ner, settings):
+    """The client to ask: `ner` (checked against `settings`) when injected,
+    else the socket client with the job's settings."""
+    if ner is None:
+        return SocketNerClient(settings.minimum_confidence, settings.model_labels)
+    return _CheckedClient(ner, settings)

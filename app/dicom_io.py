@@ -7,6 +7,8 @@ import numpy as np
 
 from pydicom.uid import ExplicitVRLittleEndian
 
+from file_errors import FileError, UNSUPPORTED_TRANSFER_SYNTAX
+
 
 def decompress_pixels(ds):
     """Decode compressed Pixel Data in place, before any pixel is touched.
@@ -30,7 +32,8 @@ def decompress_pixels(ds):
         ds.decompress()
         arr = ds.pixel_array
     except Exception as e:
-        raise RuntimeError(
+        raise FileError(
+            UNSUPPORTED_TRANSFER_SYNTAX,
             f"cannot decode pixel data in transfer syntax {ts} ({ts.name}): {e}"
         ) from e
     # pydicom 2.x decompress() switches the transfer syntax but leaves the
