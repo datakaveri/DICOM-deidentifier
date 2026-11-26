@@ -53,6 +53,49 @@ SAVE_BBOX_PREVIEW = os.getenv("SKALD_SAVE_BBOX_PREVIEW", "0").lower() in (
     "yes",
 )
 
+
+# ── Batch-run options (all opt-in; the defaults match the enclave contract) ──
+def _flag(name):
+    return os.getenv(name, "0").strip().lower() in ("1", "true", "yes")
+
+
+# "per-file" (default): OUTPUT_DIR/<name>/after_deidentification.dcm, with the
+# audits beside it -- the layout the SPIDEr enclave reads.
+# "mirror": OUTPUT_DIR/<relative path of the input>, same file name, and
+# nothing else in OUTPUT_DIR; audits, previews and benchmark logs go to
+# REPORT_DIR/<relative path without extension>/.
+OUTPUT_LAYOUT = os.getenv("SKALD_OUTPUT_LAYOUT", "per-file").strip().lower()
+if OUTPUT_LAYOUT not in ("per-file", "mirror"):
+    raise SystemExit(
+        f"SKALD_OUTPUT_LAYOUT must be per-file or mirror, not {OUTPUT_LAYOUT!r}"
+    )
+REPORT_DIR = os.getenv("SKALD_REPORT_DIR", OUTPUT_DIR)
+
+# Tags (by keyword, comma-separated) the tag pass must leave exactly as they
+# are, e.g. "StudyInstanceUID,SeriesInstanceUID,SOPInstanceUID" when the
+# de-identified files must still line up with the source study/series/image.
+PRESERVE_TAGS = tuple(
+    k.strip() for k in os.getenv("SKALD_PRESERVE_TAGS", "").split(",") if k.strip()
+)
+
+# Write the still-identified intermediates (before_deidentification.dcm,
+# data.json, phi_tags.json) to scratch under TEMP_DIR and delete each file's
+# set as soon as its tag stage is done. Always on under a job config.
+DISCARD_INTERMEDIATES = _flag("SKALD_DISCARD_INTERMEDIATES")
+
+# Skip inputs whose de-identified output and audit already exist from an
+# earlier run that succeeded, so an interrupted batch can be re-run. Pseudonyms
+# stay consistent only if the same keys directory is reused (fixed policy).
+RESUME = _flag("SKALD_RESUME")
+
+# Save the keystore every N finished files, not only at the end, so a crash
+# mid-batch does not lose the keys behind files already written.
+KEYSTORE_SAVE_EVERY = int(os.getenv("SKALD_KEYSTORE_SAVE_EVERY", "25"))
+
+BENCHMARK_FILES_NAME = "benchmark_files.jsonl"
+BENCHMARK_SUMMARY_NAME = "benchmark_summary.json"
+PREVIEW_NAME = "after_preview.png"
+
 # =============================================================================
 # SPIDEr JOB CONFIG (application "skald_dicom")
 # =============================================================================

@@ -60,7 +60,7 @@ def stub_detection(monkeypatch):
     monkeypatch.setattr(pipeline, "classify_phi", lambda *a, **k: [region])
     monkeypatch.setattr(pipeline, "expand_phi_blocks", lambda m, p, s: [region])
     monkeypatch.setattr(pipeline, "match_against_stored_tags", lambda *a, **k: [])
-    monkeypatch.setattr(pipeline, "load_original_tag_values", lambda p: {})
+    monkeypatch.setattr(pipeline, "load_original_tag_values", lambda p, **k: {})
     return region
 
 

@@ -24,8 +24,10 @@ anonymize_dicom_file runs both stages back to back.
              unparsable file fails instead of being read with force=True.
 """
 
+import copy
 import os
 import datetime
+import time
 
 import numpy as np
 import pydicom
@@ -35,6 +37,8 @@ from config import (
     ENABLE_TAG_DEIDENTIFICATION,
     BBOX_IMAGE_NAME,
     SAVE_BBOX_PREVIEW,
+    PRESERVE_TAGS,
+    PREVIEW_NAME,
 )
 from ocr_detect import detect_text_in_regions
 from classify import merge_detections, classify_phi, expand_phi_blocks, _iou
@@ -44,6 +48,7 @@ from verify import verify_redaction
 from dicom_io import (
     decompress_pixels,
     mask_embedded_overlay_bits,
+    render_for_display,
     strip_overlays,
     write_pixels_to_dicom,
 )
@@ -51,6 +56,52 @@ from de_identification.deidentify import (
     deidentify_dataset,
     deidentify_dataset_from_config,
 )
+from de_identification.tag_mapping import TAG_MAPPING, RETAIN
+
+
+def _parse_tag(text):
+    """'(0010, 0010)' as written by dump_original_tags -> (0x0010, 0x0010)."""
+    try:
+        group, element = text.strip("()").split(",")
+        return int(group, 16), int(element, 16)
+    except (AttributeError, ValueError):
+        return None
+
+
+def deidentified_tag_filter(job_config=None):
+    """Predicate for phi_tags.load_original_tag_values: True for a snapshot
+    entry whose tag the tag pass will change, i.e. whose value is PHI by the
+    run's own policy. Burned-in text equal to such a value is redacted
+    directly, without NER.
+
+      job config   the tags named in tag_actions
+      fixed policy TAG_MAPPING entries that are not "retain", plus any
+                   date-shaped tag (the deidentify.py catch-all)
+      both         private tags (always removed); never a preserved tag
+    """
+    preserved = set(PRESERVE_TAGS)
+    if job_config is not None:
+        listed = set(job_config.tag_actions)
+    else:
+        listed = {t for t, m in TAG_MAPPING.items() if m["technique"] != RETAIN}
+
+    def keep(entry):
+        keyword = entry.get("keyword") or ""
+        if keyword in preserved:
+            return False
+        tag = _parse_tag(entry.get("tag"))
+        if tag is None:
+            return False
+        if tag[0] % 2 == 1 or tag in listed:
+            return True
+        if job_config is None:
+            vr = entry.get("vr", "")
+            return vr in ("DA", "DT") or "date" in keyword.lower()
+        return False
+
+    return keep
+
+
 from bbox_visualize import save_bbox_image
 import shared_ner
 from file_errors import FileError
@@ -198,6 +249,15 @@ def redact_dataset_pixels(
 
     pixel_method = job_config.pixel["method"] if job_config else "inpaint"
     strict_verify = job_config is not None
+    timings = {}
+    audit["timings"] = timings
+    t_mark = time.perf_counter()
+
+    def lap(stage):
+        nonlocal t_mark
+        now = time.perf_counter()
+        timings[stage] = round(now - t_mark, 4)
+        t_mark = now
 
     audit["modality"] = getattr(ds, "Modality", "Unknown")
     rows = getattr(ds, "Rows", "?")
@@ -209,6 +269,7 @@ def redact_dataset_pixels(
     # RLE are decoded here and the file becomes uncompressed. Writing
     # redacted pixels into a file still marked as JPEG would corrupt it.
     source_ts = decompress_pixels(ds)
+    audit["bits_allocated"] = int(ds.get("BitsAllocated", 0) or 0)
     if source_ts is not None:
         audit["source_transfer_syntax"] = str(source_ts)
         log.info(f"  Decoded {source_ts.name}; output will be uncompressed.")
@@ -243,6 +304,7 @@ def redact_dataset_pixels(
         )
 
     pixels = ds.pixel_array.copy()
+    lap("decode")
     original_dtype = pixels.dtype
 
     # Strip overlay planes (every 60xx group), and clear any plane that lives
@@ -291,35 +353,40 @@ def redact_dataset_pixels(
     log.info("  [Stage 3] Running OCR text detection on the full frame...")
     raw_det = detect_text_in_regions(ocr_frame, [], paddle_ocr=paddle_ocr)
     log.info(f"            Raw detections: {len(raw_det)}")
+    audit["ocr_detections"] = len(raw_det)
+    lap("ocr")
 
-    # ── Stage 4: Classify ─────────────────────────────────────────────────
-    log.info("  [Stage 4] Classifying detections (PHI vs clinical)...")
     merged = merge_detections(raw_det)
-    phi_regions = classify_phi(
-        merged,
+
+    # ── Step 3 first: burned-in copies of this file's own PHI tag values ──
+    # Text equal to the value of a tag the tag pass de-identifies is PHI by
+    # the run's own policy: it is redacted directly, without NER. Only the
+    # remaining text goes to the classifier. (`stored_values` is already
+    # restricted to those tags by the caller, see deidentified_tag_filter.)
+    tag_matches = match_against_stored_tags(merged, stored_values, ocr_frame.shape)
+    matched = {tuple(m["bbox"]) for m in tag_matches}
+    log.info(f"  [Step 3] Text matching de-identified tag values: {len(matched)}")
+    lap("tag_match")
+
+    # ── Stage 4: Classify the rest ────────────────────────────────────────
+    log.info("  [Stage 4] Classifying the remaining detections (PHI vs clinical)...")
+    rest = [d for d in merged if tuple(d["bbox"]) not in matched]
+    phi_regions = tag_matches + classify_phi(
+        rest,
         ocr_frame.shape,
         analyzer,
         gliner_model,
         medical_ner,
         deid_model,
+        # The shared NER sees every OCR text, tag matches included, as before.
         shared_ner_phi=_shared_ner_phi_texts(merged, job_config, ner),
     )
+    # Block expansion sees every hit, tag matches included, so a header
+    # line next to a matched name is still redacted with it.
     phi_regions = expand_phi_blocks(merged, phi_regions, ocr_frame.shape)
+    audit["tag_matched_regions"] = len(matched)
     log.info(f"            PHI regions to redact: {len(phi_regions)}")
-
-    # ── Step 3: match OCR text against the full original-tag backup ────────
-    log.info(
-        "  [Step 3] Cross-checking OCR text against data.json (original tag values)..."
-    )
-    tag_matches = match_against_stored_tags(merged, stored_values, ocr_frame.shape)
-    existing_bboxes = [r["bbox"] for r in phi_regions]
-    added = 0
-    for m in tag_matches:
-        if not any(_iou(m["bbox"], b) > 0.3 for b in existing_bboxes):
-            phi_regions.append(m)
-            existing_bboxes.append(m["bbox"])
-            added += 1
-    log.info(f"            Additional regions matched to stored tags: {added}")
+    lap("classify")
 
     # The text is kept in memory for this run only; main.py strips it
     # before any audit is written to the output volume.
@@ -342,6 +409,7 @@ def redact_dataset_pixels(
         cleaned_pixels = np.stack(cleaned_frames, axis=0)
     else:
         cleaned_pixels, _ = redact_pixels(pixels, phi_regions, method=pixel_method)
+    lap("redact")
 
     # ── Stage 6: Verify ───────────────────────────────────────────────────
     verify_frame = cleaned_pixels[0] if cleaned_pixels.ndim == 3 else cleaned_pixels
@@ -359,6 +427,7 @@ def redact_dataset_pixels(
     else:
         cleaned_pixels_final = verify_clean
     audit["verification_status"] = status
+    lap("verify")
 
     # ── Stage 7: Write back to DICOM ─────────────────────────────────────
     log.info("  [Stage 7] Writing anonymized pixels back into DICOM dataset...")
@@ -386,6 +455,7 @@ def redact_file_pixels(
     ds=None,
     job_config=None,
     ner=None,
+    preview_path=None,
 ):
     """
     Pixel stage (Stages 1-7 up to the checkpoint): OCR, PHI classification,
@@ -395,16 +465,22 @@ def redact_file_pixels(
     read_dicom so fail_on_unparsable applies).
 
     A file-based wrapper around redact_dataset_pixels (which holds the logic
-    and is what single_file.process_file calls). Returns an audit dict for
-    deidentify_file_tags.
+    and is what single_file.process_file calls). `preview_path` is where
+    after_preview.png goes (default: beside output_path). audit["timings"]
+    records seconds per stage. Returns an audit dict for deidentify_file_tags.
     """
     filename = os.path.basename(input_path)
     audit = new_audit(filename, input_path, before_output_path, output_path)
 
     try:
+        t_read = time.perf_counter()
         if ds is None:
             ds = read_dicom(input_path, job_config)
-        stored_values = load_original_tag_values(data_snapshot_path)
+        read_secs = round(time.perf_counter() - t_read, 4)
+        # Tag-first: only the tags the tag pass de-identifies are matched.
+        stored_values = load_original_tag_values(
+            data_snapshot_path, keep=deidentified_tag_filter(job_config)
+        )
         ds, artifacts = redact_dataset_pixels(
             ds,
             filename,
@@ -418,6 +494,14 @@ def redact_file_pixels(
             job_config=job_config,
             ner=ner,
         )
+        audit["timings"] = {"read": read_secs, **audit.get("timings", {})}
+        t_mark = time.perf_counter()
+
+        def lap(stage):
+            nonlocal t_mark
+            now = time.perf_counter()
+            audit["timings"][stage] = round(now - t_mark, 4)
+            t_mark = now
 
         if artifacts is None:
             # No pixel data (SR, KO, PR): save the metadata-only checkpoint.
@@ -445,8 +529,10 @@ def redact_file_pixels(
         )
         audit["pixel_stage_complete"] = True
         log.info(f"         Pixel status: {audit['verification_status']}")
+        lap("write_checkpoint")
 
-        # Also save normalized 8-bit preview PNG for quick inspection
+        # Preview PNG, rendered as a viewer shows the written file (window,
+        # MONOCHROME1 inversion), not with a contrast stretch of its own.
         try:
             cleaned_pixels_final = artifacts.cleaned_pixels
             vis_source = (
@@ -454,19 +540,18 @@ def redact_file_pixels(
                 if cleaned_pixels_final.ndim == 3
                 else cleaned_pixels_final
             )
-            pmin, pmax = np.percentile(vis_source, (1.0, 99.0))
-            if pmax > pmin:
-                preview_8 = np.clip(
-                    (vis_source - pmin) / (pmax - pmin) * 255.0, 0, 255
-                ).astype(np.uint8)
-            else:
-                preview_8 = vis_source.astype(np.uint8)
+            preview_8 = render_for_display(vis_source, ds)
             import cv2
 
-            preview_p = os.path.join(os.path.dirname(output_path), "after_preview.png")
+            preview_p = preview_path or os.path.join(
+                os.path.dirname(output_path), PREVIEW_NAME
+            )
+            os.makedirs(os.path.dirname(preview_p), exist_ok=True)
             cv2.imwrite(preview_p, preview_8, [cv2.IMWRITE_PNG_COMPRESSION, 1])
         except Exception as pe:
             log.warning(f"  Could not save after_preview.png: {pe}")
+        lap("preview")
+        lap("preview")
 
     except Exception as e:
         log.error(f"  [ERROR] {filename}: {e}", exc_info=True)
@@ -492,6 +577,27 @@ def _deidentify_tags(ds, keystore, secrets, job_config, ner=None):
     return deidentify_dataset(ds, keystore)
 
 
+def _restore_preserved(ds, kept, trail):
+    """Puts the preserved elements back unchanged and records them in the
+    audit trail in place of whatever the tag pass did to them."""
+    tags = {str(elem.tag) for elem in kept.values()}
+    trail[:] = [e for e in trail if e.get("tag") not in tags]
+    for keyword, elem in kept.items():
+        ds[elem.tag] = elem
+        trail.append(
+            {
+                "tag": str(elem.tag),
+                "field": keyword,
+                "technique": "preserved",
+                "action": "kept (SKALD_PRESERVE_TAGS)",
+                "changed": False,
+            }
+        )
+    # The meta header must name the same instance as the dataset.
+    if "SOPInstanceUID" in kept and getattr(ds, "file_meta", None) is not None:
+        ds.file_meta.MediaStorageSOPInstanceUID = ds.SOPInstanceUID
+
+
 def deidentify_file_tags(audit, keystore, job_config=None, secrets=None, ner=None):
     """
     Tag stage: reads the pixel-redacted checkpoint, de-identifies its tags
@@ -509,11 +615,16 @@ def deidentify_file_tags(audit, keystore, job_config=None, secrets=None, ner=Non
         ds = pydicom.dcmread(audit["before_output_path"], force=True)
 
         # ── Last: tag de-identification ───────────────────────────────────────
+        # Tags that must survive exactly as they are (SKALD_PRESERVE_TAGS).
+        kept = {kw: copy.deepcopy(ds[kw]) for kw in PRESERVE_TAGS if kw in ds}
         audit["deidentified_tags"] = _deidentify_tags(
             ds, keystore, secrets, job_config, ner=ner
         )
+        if kept:
+            _restore_preserved(ds, kept, audit["deidentified_tags"])
 
         # ── Save as DICOM ONLY ────────────────────────────────────────────────
+        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
         ds.save_as(output_path, write_like_original=False)
         audit["output_transfer_syntax"] = str(ds.file_meta.TransferSyntaxUID)
 

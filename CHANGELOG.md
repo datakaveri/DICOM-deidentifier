@@ -8,7 +8,46 @@ See [`docs/releasing.md`](docs/releasing.md).
 
 ## [Unreleased]
 
+### Fixed
+
+- **12- and 14-bit images were rewritten as 16-bit.** Writing the redacted
+  pixels back set `BitsStored`/`HighBit` from the array type (16/15) instead
+  of keeping the original (for example 12/11). Pixel values were unchanged,
+  but viewers take the value range, and the MONOCHROME1 inversion, from
+  `BitsStored`, so contrast and brightness shifted. The original values are
+  now kept whenever the redacted pixels still fit. This affected 2,192 of
+  2,953 PACS chest X-rays in the 2026-11-18 batch.
+- **`after_preview.png` of MONOCHROME1 images was inverted**, and every
+  preview used its own percentile stretch. Previews are now rendered as a
+  viewer shows the file: rescale, the file's window, and MONOCHROME1
+  inversion.
+
+### Changed
+
+- **Tag-first pixel classification.** Burned-in text that equals the value of
+  a tag the tag pass de-identifies is redacted directly, and only the rest
+  goes to the NER models. "De-identified" means the job config's
+  `tag_actions` or, under the fixed policy, non-retained `tag_mapping.py`
+  entries and dates; private tags count in both. Before, the text was
+  matched against every tag (Manufacturer, StationName, ...) and only after
+  NER, so burned-in copies of non-PHI values were blacked out. On the sample
+  set, the output is pixel-identical to 2.0.0.
+- With a scratch directory, each file's intermediates are deleted when the
+  file finishes, not at the end of the batch.
+
 ### Added
+
+- `SKALD_OUTPUT_LAYOUT=mirror` and `SKALD_REPORT_DIR`: the output keeps the
+  input's relative paths and file names, and holds nothing else.
+- `SKALD_PRESERVE_TAGS`: tags the tag pass leaves unchanged. The meta
+  header follows a preserved `SOPInstanceUID`.
+- `SKALD_DISCARD_INTERMEDIATES`, `SKALD_RESUME` and
+  `SKALD_KEYSTORE_SAVE_EVERY` (default 25) for long batches.
+- Benchmark logs: `benchmark_files.jsonl` and `benchmark_summary.json`, plus
+  a `PROGRESS` line with ETA per file.
+- `scripts/batch/inventory.py`: Excel inventory of every DICOM's tags and the
+  chest selection. `scripts/vm/` contains VM setup, upload, batch runner and
+  monitor scripts.
 - The shared Anamika NER engine (2026-11-23), reached through a Unix socket
   the SPIDEr enclave mounts at `/run/anamika-ner/ner.sock`; the enclave sends
   the text to an attested NER TEE. See `app/shared_ner.py`.

@@ -34,6 +34,7 @@ NOT_DICOM even under the fixed policy (the CLI there reads it with force=True
 and writes it out), and nothing is checkpointed to disk.
 """
 
+import copy
 import hashlib
 import io
 import json
@@ -213,7 +214,10 @@ def process_file(data, rel_path, config, engines, keys=None):
     from de_identification.uids import remap_unlisted_uids, sync_file_meta_uid
     from phi_tags import original_tag_values, snapshot_original_tags
     from pipeline import (
+        PRESERVE_TAGS,
         _deidentify_tags,
+        _restore_preserved,
+        deidentified_tag_filter,
         new_audit,
         read_dicom,
         redact_dataset_pixels,
@@ -238,7 +242,9 @@ def process_file(data, rel_path, config, engines, keys=None):
         except Exception as e:  # noqa: BLE001 -- pydicom raises many types
             return _fail(rel_path, codes.NOT_DICOM, raw, job_config, started, e)
 
-        stored_values = original_tag_values(snapshot_original_tags(ds))
+        stored_values = original_tag_values(
+            snapshot_original_tags(ds), keep=deidentified_tag_filter(job_config)
+        )
 
         # ── Pixels (OCR, classify, redact, verify) ───────────────────────────
         t0 = time.time()
@@ -276,9 +282,14 @@ def process_file(data, rel_path, config, engines, keys=None):
             # UIDs no policy names (referenced series/instances, ...) first;
             # the policy pass then maps the named ones with the same HMAC.
             remap_unlisted_uids(ds, keys.uid_key, job_config, uid_audit)
+        # Tags that must survive exactly as they are (SKALD_PRESERVE_TAGS),
+        # as in pipeline.deidentify_file_tags.
+        kept = {kw: copy.deepcopy(ds[kw]) for kw in PRESERVE_TAGS if kw in ds}
         raw["deidentified_tags"] = _deidentify_tags(
             ds, keys.keystore, keys.secrets if job_config is not None else None, job_config, ner=engines.ner
         ) + uid_audit
+        if kept:
+            _restore_preserved(ds, kept, raw["deidentified_tags"])
         if keys.uid_key:
             sync_file_meta_uid(ds)
         out = io.BytesIO()

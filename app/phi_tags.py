@@ -115,7 +115,7 @@ def dump_original_tags(ds: pydicom.Dataset, path: str) -> None:
         json.dump(snapshot, f, indent=2)
 
 
-def load_original_tag_values(path: str) -> list:
+def load_original_tag_values(path: str, keep=None) -> list:
     """
     Loads the full original-tag backup (data.json, written by
     dump_original_tags() before anything runs) and returns the values to
@@ -126,18 +126,23 @@ def load_original_tag_values(path: str) -> list:
         BodyPartExamined, etc. -- e.g. "CHEST", "CR") are excluded, so a
         safe clinical label can't get flagged as a PHI match
       - very short values are dropped as unreliable to match
+    `keep`, if given, is a predicate on a snapshot entry ({"tag", "keyword",
+    "vr", "value"}): only entries it accepts are matched. The pipeline passes
+    "this tag is de-identified by the tag pass", so burned-in copies of kept,
+    non-PHI values (Manufacturer, StationName, ...) are not blacked out.
     """
     if not os.path.exists(path):
         return []
 
     with open(path, "r") as f:
         snapshot = json.load(f)
-    return original_tag_values(snapshot)
+    return original_tag_values(snapshot, keep=keep)
 
 
-def original_tag_values(snapshot: list) -> list:
-    """The match values load_original_tag_values describes, from an in-memory
-    snapshot (snapshot_original_tags) instead of data.json."""
+def original_tag_values(snapshot: list, keep=None) -> list:
+    """The match values load_original_tag_values describes (including its
+    `keep` predicate), from an in-memory snapshot (snapshot_original_tags)
+    instead of data.json."""
     values = []
     for entry in snapshot:
         val = (entry.get("value") or "").strip()
@@ -148,6 +153,8 @@ def original_tag_values(snapshot: list) -> list:
         if vr == "UI" or keyword.endswith("UID"):
             continue
         if _is_clinical(val):
+            continue
+        if keep is not None and not keep(entry):
             continue
         values.append(val)
     return values

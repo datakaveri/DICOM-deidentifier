@@ -53,10 +53,51 @@ def _set_pixel_data(ds, arr):
     elem.VR = "OB" if ds.BitsAllocated <= 8 else "OW"
 
 
+def _fits(arr, bits, signed):
+    if arr.size == 0:
+        return True
+    lo, hi = int(arr.min()), int(arr.max())
+    if signed:
+        return -(2 ** (bits - 1)) <= lo and hi < 2 ** (bits - 1)
+    return 0 <= lo and hi < 2**bits
+
+
+def render_for_display(arr, ds):
+    """8-bit rendering of a frame the way a viewer shows it: Modality LUT
+    (rescale), the file's first window (else the full value range), then
+    MONOCHROME1 inverted so bone is white."""
+    a = arr.astype(np.float64)
+    slope = float(ds.get("RescaleSlope", 1) or 1)
+    intercept = float(ds.get("RescaleIntercept", 0) or 0)
+    a = a * slope + intercept
+    center, width = ds.get("WindowCenter"), ds.get("WindowWidth")
+    if center is not None and width is not None:
+        center = float(
+            center[0]
+            if hasattr(center, "__len__") and not isinstance(center, str)
+            else center
+        )
+        width = float(
+            width[0]
+            if hasattr(width, "__len__") and not isinstance(width, str)
+            else width
+        )
+        lo, hi = center - width / 2, center + width / 2
+    else:
+        lo, hi = float(a.min()), float(a.max())
+    if hi <= lo:
+        hi = lo + 1
+    out = (np.clip((a - lo) / (hi - lo), 0, 1) * 255.0).astype(np.uint8)
+    if str(ds.get("PhotometricInterpretation", "")) == "MONOCHROME1":
+        out = 255 - out
+    return out
+
+
 def write_pixels_to_dicom(ds, cleaned_array):
     """
     Correctly writes the anonymized pixel array back into the DICOM dataset.
-    Updates ALL mandatory pixel descriptor tags to match the array's dtype/shape.
+    Sets the pixel descriptor tags from the array's dtype/shape, keeping the
+    original BitsStored/HighBit whenever the values still fit in them.
     """
     arr = cleaned_array
 
@@ -91,6 +132,21 @@ def write_pixels_to_dicom(ds, cleaned_array):
         bits_stored = 16
         high_bit = 15
         pix_rep = 0
+
+    # Keep the original BitsStored/HighBit when the redacted pixels still fit
+    # in them. Viewers take the value range from BitsStored (and invert a
+    # MONOCHROME1 image against it), so rewriting a 12-bit image as 16-bit
+    # changes how it displays even though no pixel value changed.
+    orig_stored = ds.get("BitsStored")
+    if (
+        orig_stored
+        and ds.get("BitsAllocated") == bits_alloc
+        and ds.get("PixelRepresentation", pix_rep) == pix_rep
+        and 0 < int(orig_stored) < bits_alloc
+        and _fits(arr, int(orig_stored), pix_rep)
+    ):
+        bits_stored = int(orig_stored)
+        high_bit = bits_stored - 1
 
     # Update all pixel descriptor tags
     ds.BitsAllocated = bits_alloc
